@@ -28,7 +28,7 @@ google_client = OAuth2Session(config['google_client_id'],
                     scope=[config['google_scope']], 
                     redirect_uri=config['google_redirect_uri'])
 
-route_order = ["/", "engine","explore", "utilities", "docs", "account"] # "policies"
+route_order = ["/", "engine","explore", "utilities", "docs", "harmonisation", "account"] # "policies"
 
 def store_in_session_storage(key, value):
     sesssion_id = solara.get_session_id()
