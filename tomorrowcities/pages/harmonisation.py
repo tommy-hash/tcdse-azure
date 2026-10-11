@@ -8,7 +8,7 @@ import zipfile
 import pandas as pd
 import solara
 
-from ..components.file_drop import FileDrop
+from ..components.file_drop import FileDropMultiple
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ROWS = 100_000
@@ -221,41 +221,119 @@ def Page():
     audit, set_audit = solara.use_state(pd.DataFrame())
     flags, set_flags = solara.use_state(pd.DataFrame())
     stage, set_stage = solara.use_state(1)
+    datasets, set_datasets = solara.use_state([])
+    results, set_results = solara.use_state([])
+    combined_output, set_combined_output = solara.use_state(None)
+    assistant_question, set_assistant_question = solara.use_state("")
+    assistant_answer, set_assistant_answer = solara.use_state("Upload files and ask about their profile, missing values, mapping suggestions or review flags.")
 
     def reset():
         set_filename(""); set_df(None); set_error(""); set_notice("")
         set_package_df(None); set_package_note("")
         set_suggestions(pd.DataFrame()); set_output(None)
         set_audit(pd.DataFrame()); set_flags(pd.DataFrame()); set_stage(1)
+        set_datasets([]); set_results([]); set_combined_output(None)
+        set_assistant_question("")
+        set_assistant_answer("Upload files and ask about their profile, missing values, mapping suggestions or review flags.")
 
-    def on_file(info):
+    def on_files(infos):
         reset()
-        try:
+        loaded, errors, packages = [], [], []
+        total_bytes = 0
+        for info in infos:
             name, content = str(info.get("name", "uploaded file")), info.get("data")
-            if content is None:
-                raise ValueError("No file content was received.")
-            if _suffix(name) in {".mpk", ".mpkx"}:
-                p, note = _inspect_package(content, name)
-                set_filename(name); set_package_df(p); set_package_note(note)
-                set_notice("Package inventory complete; no files were extracted.")
-                set_stage(2); return
-            data = _read_dataset(name, content)
-            if not len(data.columns):
-                raise ValueError("No columns were detected.")
-            set_filename(name); set_df(data)
-            set_notice(f"Loaded {len(data):,} rows in memory. The source file has not been changed.")
+            try:
+                if content is None:
+                    raise ValueError("No file content was received.")
+                total_bytes += len(content)
+                if total_bytes > 100 * 1024 * 1024:
+                    raise ValueError("The combined upload exceeds 100 MB. Upload smaller batches.")
+                if _suffix(name) in {".mpk", ".mpkx"}:
+                    p, note = _inspect_package(content, name)
+                    packages.append({"name": name, "inventory": p, "note": note})
+                    continue
+                data = _read_dataset(name, content)
+                if not len(data.columns):
+                    raise ValueError("No columns were detected.")
+                loaded.append({"name": name, "df": data})
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+        set_datasets(loaded)
+        set_package_df(packages[0]["inventory"] if packages else None)
+        set_package_note("\\n".join(x["note"] for x in packages))
+        if loaded:
+            set_filename(loaded[0]["name"] if len(loaded) == 1 else f"{len(loaded)} datasets")
+            set_df(loaded[0]["df"])
+            set_notice(f"Loaded {len(loaded)} dataset(s) and {len(packages)} package(s). Source files remain unchanged.")
             set_stage(2)
-        except Exception as exc:
-            set_error(str(exc))
+        if errors:
+            set_error("\\n".join(errors))
+        if not loaded and not packages and not errors:
+            set_error("No files were received.")
 
     def map_fields():
-        if df is not None:
-            set_suggestions(_mappings(df)); set_stage(3)
+        if datasets:
+            rows = []
+            for item in datasets:
+                mapped = _mappings(item["df"])
+                if not mapped.empty:
+                    mapped.insert(0, "source_file", item["name"])
+                    rows.extend(mapped.to_dict("records"))
+            set_suggestions(pd.DataFrame(rows, columns=["source_file", "source_field", "suggested_target", "basis", "review_note", "sample_values"]))
+            set_stage(3)
 
     def run_rules():
-        if df is not None:
-            result, changes, review = _harmonise(df)
-            set_output(result); set_audit(changes); set_flags(review); set_stage(4)
+        if datasets:
+            processed = []
+            all_audit, all_flags = [], []
+            for item in datasets:
+                result, changes, review = _harmonise(item["df"])
+                result.insert(0, "__source_file", item["name"])
+                if not changes.empty:
+                    changes.insert(0, "source_file", item["name"])
+                    all_audit.extend(changes.to_dict("records"))
+                if not review.empty:
+                    review.insert(0, "source_file", item["name"])
+                    all_flags.extend(review.to_dict("records"))
+                processed.append({"name": item["name"], "df": result})
+            set_results(processed)
+            set_output(processed[0]["df"] if processed else None)
+            set_audit(pd.DataFrame(all_audit))
+            set_flags(pd.DataFrame(all_flags))
+            set_stage(4)
+
+    def combine_compatible():
+        if not results:
+            set_error("Run the safe-rule review before combining files.")
+            return
+        first_cols = list(results[0]["df"].columns)
+        first_schema = {str(c).strip().lower() for c in first_cols}
+        incompatible = [x["name"] for x in results[1:] if {str(c).strip().lower() for c in x["df"].columns} != first_schema]
+        if incompatible:
+            set_error("Cannot append these files safely because their column sets differ: " + ", ".join(incompatible) + ". Review mappings and align schemas first.")
+            return
+        set_combined_output(pd.concat([x["df"] for x in results], ignore_index=True, sort=False))
+        set_error("")
+        set_notice(f"Combined {len(results)} files by appending rows. The __source_file column preserves provenance; this is not a relational join.")
+
+    def ask_assistant():
+        q = assistant_question.strip().lower()
+        if not q:
+            set_assistant_answer("Enter a question about the uploaded data first.")
+            return
+        if not datasets:
+            set_assistant_answer("Upload one or more datasets first. I can then summarise the profiles and rule-based review flags.")
+        elif any(term in q for term in ("missing", "null", "empty")):
+            total = sum(int(x["df"].isna().sum().sum()) for x in datasets)
+            set_assistant_answer(f"Across {len(datasets)} uploaded dataset(s), {total:,} cells are missing according to the current parser. This count does not determine why values are missing or whether imputation is appropriate.")
+        elif any(term in q for term in ("flag", "review", "issue", "problem", "error")):
+            set_assistant_answer(f"The current rule pass has {len(flags)} review flag(s). Run ‘Apply safe rules & show review flags’ to refresh them. Review flags are evidence for inspection, not automatic corrections.")
+        elif any(term in q for term in ("map", "field", "column", "schema")):
+            set_assistant_answer(f"There are {len(suggestions)} field-mapping suggestion(s). They are based on field-name heuristics and need confirmation of meaning, units, geography and time period.")
+        elif any(term in q for term in ("combine", "merge", "join")):
+            set_assistant_answer("The current controlled combine operation appends rows only when processed files have matching column sets. It preserves a __source_file provenance column. Relational joins by household ID, geography or time are not enabled yet because keys and cardinality must be validated first.")
+        else:
+            set_assistant_answer(f"I can currently answer profile questions for {len(datasets)} dataset(s), report missing-cell counts, explain rule-based review flags, summarise mapping suggestions and describe safe row-appending. This panel is a local prototype, not yet connected to a live AI model.")
 
     stages = ["Upload", "Profile", "Map fields", "Review & harmonise", "Export"]
     with solara.Column(gap="16px", style={"max-width": "1440px", "margin": "0 auto", "padding": "8px 12px 28px"}):
@@ -274,12 +352,20 @@ def Page():
             with solara.Column(gap="12px"):
                 with solara.Card():
                     solara.Markdown("## 1. Add your data")
-                    solara.Markdown("**Supported now:** CSV, TSV, delimited TXT, XLSX, JSON, JSON Lines and GeoJSON. **Upload limit:** 25 MB. Data stays in session memory.")
-                    FileDrop(label="Drop a file here, or click to browse", on_file=on_file, lazy=False, uid="tcdse-harmoniser-upload-v2")
+                    solara.Markdown("**Supported now:** CSV, TSV, delimited TXT, XLSX, JSON, JSON Lines and GeoJSON. Up to 25 MB per file and 100 MB combined per upload batch. Files are profiled separately first.")
+                    FileDropMultiple(label="Drop multiple files here, or click to browse", on_file=on_files, lazy=False, uid="tcdse-harmoniser-upload-v3")
                     if notice: solara.Success(notice)
                     if error: solara.Error(error)
                     solara.Markdown("**Planned adapters:** SQLite table discovery; Access .mdb; read-only SQL Server/PostgreSQL; ArcGIS layer extraction from .mpk/.mpkx. These database and GIS capabilities are not yet fully enabled.")
-                if df is not None:
+                if datasets:
+                    with solara.Card():
+                        solara.Markdown("## 2. Uploaded datasets")
+                        solara.Markdown("Each file remains a separate dataset unless you explicitly combine compatible schemas.")
+                        solara.DataFrame(pd.DataFrame([{"file": item["name"], "rows": len(item["df"]), "columns": len(item["df"].columns), "missing_cells": int(item["df"].isna().sum().sum()), "duplicate_column_names": int(item["df"].columns.duplicated().sum())} for item in datasets]))
+                        for item in datasets:
+                            with solara.Details(f"Profile: {item['name']}", expand=False):
+                                solara.DataFrame(_profile(item["df"]))
+                                solara.DataFrame(item["df"].head(10))
                     with solara.Card():
                         solara.Markdown("## 2. Source profile")
                         with solara.Row(style={"gap": "8px", "flex-wrap": "wrap"}):
@@ -313,6 +399,15 @@ def Page():
                             else:
                                 solara.Success("No values flagged by these rules. This does not guarantee semantic correctness.")
                             solara.FileDownload(data=output.to_csv(index=False), filename="tcdse_harmonised_preview.csv", mime_type="text/csv")
+                            if len(results) > 1:
+                                solara.Markdown("### Per-file outputs")
+                                for item in results:
+                                    solara.Markdown(f"**{item['name']}** — {len(item['df']):,} rows")
+                                    solara.FileDownload(data=item["df"].to_csv(index=False), filename=f"harmonised_{PurePosixPath(item['name']).stem}.csv", mime_type="text/csv")
+                                solara.Button("Combine files by appending rows (matching schemas only)", on_click=combine_compatible, color="primary", block=True)
+                                if combined_output is not None:
+                                    solara.Markdown(f"Combined output: **{len(combined_output):,} rows** across {len(results)} files.")
+                                    solara.FileDownload(data=combined_output.to_csv(index=False), filename="tcdse_combined_harmonised.csv", mime_type="text/csv")
                 if package_df is not None:
                     with solara.Card():
                         solara.Markdown("## ArcGIS package inspection")
@@ -325,6 +420,12 @@ def Page():
                         solara.Markdown("1. Upload data.\\n2. Review the profile.\\n3. Generate mapping suggestions.\\n4. Apply conservative rules.\\n5. Review flags and export.")
             with solara.Column(gap="12px"):
                 AssistantPanel(filename=filename, dataframe=df, suggestions=suggestions, flags=flags)
+                with solara.Card():
+                    solara.Markdown("### Ask the Assistant")
+                    solara.Markdown("Ask about missing values, mapping suggestions, review flags or combining datasets. This first interface uses local rule-based answers; live AI integration is a separate, upcoming step.")
+                    solara.InputText(label="Your question", value=assistant_question, on_value=set_assistant_question)
+                    solara.Button("Ask", on_click=ask_assistant, color="primary", block=True)
+                    solara.Markdown(assistant_answer)
                 with solara.Card():
                     solara.Markdown("### Evidence-constrained safeguards")
                     solara.Markdown("- Preserve original values.\\n- Never fill missing observations automatically.\\n- Flag ambiguous units and invalid values.\\n- Record transformation rules.\\n- Require human review where meaning is uncertain.")
