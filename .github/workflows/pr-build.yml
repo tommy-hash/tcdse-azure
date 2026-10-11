@@ -1,0 +1,27 @@
+name: Validate TCDSE pull request
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Build Docker image without publishing or deploying
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: tcdse:pr-validation
+
+      - name: Check Python syntax for Harmoniser page
+        run: python -m py_compile tomorrowcities/pages/harmonisation.py
