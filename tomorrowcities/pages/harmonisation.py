@@ -79,7 +79,7 @@ def _read_dataset(filename, content):
     if ext == ".csv":
         return pd.read_csv(buf, nrows=MAX_ROWS)
     if ext == ".tsv":
-        return pd.read_csv(buf, sep="\\t", nrows=MAX_ROWS)
+        return pd.read_csv(buf, sep="\t", nrows=MAX_ROWS)
     if ext == ".txt":
         try:
             return pd.read_csv(buf, sep=None, engine="python", nrows=MAX_ROWS)
@@ -165,7 +165,7 @@ def _harmonise(df):
         def amount(v):
             if pd.isna(v) or not str(v).strip():
                 return pd.NA
-            cleaned = re.sub(r"(?i)KES|KSh|[,\\s]", "", str(v)).strip()
+            cleaned = re.sub(r"(?i)KES|KSh|[,\s]", "", str(v)).strip()
             try:
                 return float(cleaned)
             except ValueError:
@@ -178,7 +178,7 @@ def _harmonise(df):
     if rainfall:
         vals = []
         for idx, raw in df[rainfall].items():
-            m = re.fullmatch(r"\\s*(-?\\d+(?:\\.\\d+)?)\\s*mm\\s*", str(raw), flags=re.I) if pd.notna(raw) else None
+            m = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*mm\s*", str(raw), flags=re.I) if pd.notna(raw) else None
             vals.append(float(m.group(1)) if m else pd.NA)
             if pd.notna(raw) and str(raw).strip() and not m:
                 flags.append({"row": idx, "field": str(rainfall), "value": raw, "issue": "Rainfall unit ambiguous; expected explicit mm"})
