@@ -366,18 +366,22 @@ def Page():
                             with solara.Details(f"Profile: {item['name']}", expand=False):
                                 solara.DataFrame(_profile(item["df"]))
                                 solara.DataFrame(item["df"].head(10))
-                    with solara.Card():
-                        solara.Markdown("## 2. Source profile")
-                        with solara.Row(style={"gap": "8px", "flex-wrap": "wrap"}):
-                            for label, value in [("Rows", f"{len(df):,}"), ("Columns", str(len(df.columns))),
-                                                 ("Missing cells", f"{int(df.isna().sum().sum()):,}"),
-                                                 ("Duplicate column names", str(int(df.columns.duplicated().sum())))]:
-                                with solara.Card():
-                                    solara.Markdown(f"**{label}**")
-                                    solara.Markdown(f"### {value}")
-                        solara.DataFrame(_profile(df))
-                        with solara.Details("Preview source rows", expand=False):
-                            solara.DataFrame(df.head(20))
+                    # The legacy single-file profile uses df, while multi-file
+                    # uploads are stored in datasets. Guard against transient
+                    # state updates where datasets is populated before df.
+                    if df is not None:
+                        with solara.Card():
+                            solara.Markdown("## 2. Source profile")
+                            with solara.Row(style={"gap": "8px", "flex-wrap": "wrap"}):
+                                for label, value in [("Rows", f"{len(df):,}"), ("Columns", str(len(df.columns))),
+                                                     ("Missing cells", f"{int(df.isna().sum().sum()):,}"),
+                                                     ("Duplicate column names", str(int(df.columns.duplicated().sum())))]:
+                                    with solara.Card():
+                                        solara.Markdown(f"**{label}**")
+                                        solara.Markdown(f"### {value}")
+                            solara.DataFrame(_profile(df))
+                            with solara.Details("Preview source rows", expand=False):
+                                solara.DataFrame(df.head(20))
                     with solara.Card():
                         solara.Markdown("## 3. Map source fields")
                         solara.Markdown("Suggestions are based on field names and sample values. Confirm meaning, units, geography and time period before applying mappings.")
