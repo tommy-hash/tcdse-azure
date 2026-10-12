@@ -195,18 +195,23 @@ def _harmonise(df):
 
 
 @solara.component
-def AssistantPanel(filename, dataframe, suggestions, flags):
+def AssistantPanel(datasets, suggestions, flags):
     with solara.Card():
         solara.Markdown("### ✨ Harmonisation assistant")
-        if dataframe is None:
-            solara.Markdown("Upload a dataset and I’ll explain its structure, suggest likely field mappings and highlight decisions that need your confirmation. I will not invent missing values or silently overwrite source data.")
+        if not datasets:
+            solara.Markdown("Upload one or more datasets. I’ll summarise each file separately, show aggregate counts, suggest likely field mappings and highlight decisions that need your confirmation. I will not invent missing values or silently overwrite source data.")
         else:
-            solara.Markdown(f"**Dataset:** {filename}")
-            solara.Markdown(f"Detected **{len(dataframe):,} rows**, **{len(dataframe.columns)} fields**, and **{int(dataframe.isna().sum().sum())} missing cells**.")
+            total_rows = sum(len(item["df"]) for item in datasets)
+            total_missing = sum(int(item["df"].isna().sum().sum()) for item in datasets)
+            solara.Markdown(f"**Workspace:** {len(datasets)} dataset(s)")
+            solara.Markdown(f"Across all uploaded files: **{total_rows:,} rows**, **{total_missing:,} missing cells**.")
+            solara.Markdown("**Per-file summary:**")
+            for item in datasets:
+                frame = item["df"]
+                solara.Markdown(f"- **{item['name']}** — {len(frame):,} rows, {len(frame.columns)} fields, {int(frame.isna().sum().sum()):,} missing cells")
             solara.Markdown(f"Current workspace has **{len(suggestions)} mapping suggestions** and **{len(flags)} review flags**.")
             solara.Markdown("**Suggested next action:** inspect field mappings and units, then apply conservative rules. Ambiguous values remain unresolved.")
-        solara.Markdown("> This first version uses transparent local rules, not a live conversational AI service. An AI endpoint can be connected in a later stage.")
-
+        solara.Markdown("> This first version uses transparent local rules, not a live conversational AI service.")
 
 @solara.component
 def Page():
@@ -402,16 +407,20 @@ def Page():
                                 solara.DataFrame(flags)
                             else:
                                 solara.Success("No values flagged by these rules. This does not guarantee semantic correctness.")
-                            solara.FileDownload(data=output.to_csv(index=False), filename="tcdse_harmonised_preview.csv", mime_type="text/csv")
-                            if len(results) > 1:
-                                solara.Markdown("### Per-file outputs")
-                                for item in results:
-                                    solara.Markdown(f"**{item['name']}** — {len(item['df']):,} rows")
-                                    solara.FileDownload(data=item["df"].to_csv(index=False), filename=f"harmonised_{PurePosixPath(item['name']).stem}.csv", mime_type="text/csv")
-                                solara.Button("Combine files by appending rows (matching schemas only)", on_click=combine_compatible, color="primary", block=True)
-                                if combined_output is not None:
-                                    solara.Markdown(f"Combined output: **{len(combined_output):,} rows** across {len(results)} files.")
-                                    solara.FileDownload(data=combined_output.to_csv(index=False), filename="tcdse_combined_harmonised.csv", mime_type="text/csv")
+                            with solara.Card():
+                                solara.Markdown("## 5. Export results")
+                                solara.Markdown("Download the processed CSV. For multi-file uploads, each dataset has its own download; combining is optional and only appends rows when column sets match.")
+                                solara.FileDownload(data=output.to_csv(index=False), filename="tcdse_harmonised_preview.csv", mime_type="text/csv")
+                                solara.Markdown("**Download processed file:** use the download control above.")
+                                if len(results) > 1:
+                                    solara.Markdown("### Per-file exports")
+                                    for item in results:
+                                        solara.Markdown(f"**{item['name']}** — {len(item['df']):,} rows")
+                                        solara.FileDownload(data=item["df"].to_csv(index=False), filename=f"harmonised_{PurePosixPath(item['name']).stem}.csv", mime_type="text/csv")
+                                    solara.Button("Combine files by appending rows (matching schemas only)", on_click=combine_compatible, color="primary", block=True)
+                                    if combined_output is not None:
+                                        solara.Markdown(f"Combined output: **{len(combined_output):,} rows** across {len(results)} files.")
+                                        solara.FileDownload(data=combined_output.to_csv(index=False), filename="tcdse_combined_harmonised.csv", mime_type="text/csv")
                 if package_df is not None:
                     with solara.Card():
                         solara.Markdown("## ArcGIS package inspection")
@@ -423,7 +432,7 @@ def Page():
                         solara.Markdown("## Your workflow")
                         solara.Markdown("1. Upload data.\\n2. Review the profile.\\n3. Generate mapping suggestions.\\n4. Apply conservative rules.\\n5. Review flags and export.")
             with solara.Column(gap="12px"):
-                AssistantPanel(filename=filename, dataframe=df, suggestions=suggestions, flags=flags)
+                AssistantPanel(datasets=datasets, suggestions=suggestions, flags=flags)
                 with solara.Card():
                     solara.Markdown("### Ask the Assistant")
                     solara.Markdown("Ask about missing values, mapping suggestions, review flags or combining datasets. This first interface uses local rule-based answers; live AI integration is a separate, upcoming step.")
