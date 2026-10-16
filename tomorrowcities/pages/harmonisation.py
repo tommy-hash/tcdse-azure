@@ -9,6 +9,7 @@ import pandas as pd
 import solara
 
 from ..components.file_drop import FileDropMultiple
+from ..services.bronze_upload import list_raw_batches, upload_raw_batch, verify_raw_batch
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ROWS = 100_000
@@ -231,6 +232,52 @@ def Page():
     combined_output, set_combined_output = solara.use_state(None)
     assistant_question, set_assistant_question = solara.use_state("")
     assistant_answer, set_assistant_answer = solara.use_state("Upload files and ask about their profile, missing values, mapping suggestions or review flags.")
+    bronze_notice, set_bronze_notice = solara.use_state("")
+    bronze_error, set_bronze_error = solara.use_state("")
+    bronze_batches, set_bronze_batches = solara.use_state([])
+    checksum_results, set_checksum_results = solara.use_state([])
+
+    def refresh_bronze():
+        try:
+            set_bronze_batches(list_raw_batches())
+            set_bronze_error("")
+            set_bronze_notice("Import records refreshed from Azure Bronze.")
+        except Exception as exc:
+            set_bronze_error(f"Could not read Bronze import records: {exc}")
+
+    def upload_bronze_files(infos):
+        try:
+            if not infos:
+                raise ValueError("Choose at least one raw file.")
+            files = []
+            total = 0
+            for info in infos:
+                name, content = str(info.get("name", "uploaded file")), info.get("data")
+                if content is None:
+                    raise ValueError(f"No file content was received for {name}.")
+                total += len(content)
+                if total > 100 * 1024 * 1024:
+                    raise ValueError("The combined raw upload exceeds 100 MB. Upload smaller batches.")
+                files.append({"name": name, "data": content})
+            result = upload_raw_batch(files, country="Kenya", project="Kalobeyei Settlement")
+            set_bronze_notice(f"Uploaded {len(result['files'])} original file(s). Batch: {result['batch_id']}")
+            set_bronze_error("")
+            set_checksum_results([])
+            set_bronze_batches(list_raw_batches())
+        except Exception as exc:
+            set_bronze_error(f"Bronze import failed: {exc}")
+            set_bronze_notice("")
+
+    def verify_bronze_batch(manifest_path):
+        try:
+            results = verify_raw_batch(manifest_path)
+            set_checksum_results(results)
+            failures = sum(1 for item in results if item.get("status") != "PASS")
+            set_bronze_notice(f"Checksum verification finished: {len(results) - failures} passed; {failures} failed or errored.")
+            set_bronze_error("")
+        except Exception as exc:
+            set_bronze_error(f"Checksum verification failed: {exc}")
+            set_checksum_results([])
 
     def reset():
         set_filename(""); set_df(None); set_error(""); set_notice("")
@@ -355,6 +402,41 @@ def Page():
                               style={"border-radius": "22px", "text-transform": "none"})
         with solara.ColumnsResponsive(12, small=12, medium=8, large=8):
             with solara.Column(gap="12px"):
+                with solara.Card():
+                    solara.Markdown("## Bronze raw-file import")
+                    solara.Markdown("Import the original Kalobeyei source files here, even when they cannot yet be profiled. Files are stored unchanged in Azure Data Lake Storage; this step does not extract, harmonise or train models.")
+                    solara.Markdown("**Destination:** Kenya / Kalobeyei Settlement · **Limit:** 100 MB combined per batch")
+                    FileDropMultiple(label="Drop raw Kalobeyei files here, or click to browse", on_file=upload_bronze_files, lazy=False, uid="tcdse-bronze-raw-upload-v1")
+                    with solara.Row(style={"gap": "8px", "flex-wrap": "wrap"}):
+                        solara.Button("Refresh import records", on_click=refresh_bronze, color="primary")
+                    if bronze_notice:
+                        solara.Success(bronze_notice)
+                    if bronze_error:
+                        solara.Error(bronze_error)
+                    if bronze_batches:
+                        solara.Markdown("### Import records")
+                        solara.DataFrame(pd.DataFrame([{
+                            "batch_id": b.get("batch_id", ""),
+                            "created_utc": b.get("created_utc", ""),
+                            "country": b.get("country", ""),
+                            "project": b.get("project", ""),
+                            "files": b.get("file_count", 0),
+                            "total_bytes": b.get("total_bytes", 0),
+                            "status": b.get("status", ""),
+                            "manifest_path": b.get("manifest_path", ""),
+                        } for b in bronze_batches]))
+                        for batch in bronze_batches:
+                            with solara.Details(f"Batch {batch.get('batch_id', 'unknown')} — {batch.get('file_count', 0)} file(s)", expand=False):
+                                if batch.get("files"):
+                                    solara.DataFrame(pd.DataFrame(batch["files"]))
+                                solara.Button("Verify SHA-256 checksums", on_click=lambda path=batch.get("manifest_path", ""): verify_bronze_batch(path), color="primary")
+                    if checksum_results:
+                        solara.Markdown("### Checksum verification results")
+                        solara.DataFrame(pd.DataFrame(checksum_results))
+                        if all(item.get("status") == "PASS" for item in checksum_results):
+                            solara.Success("All files in the selected batch match their recorded SHA-256 checksums and byte sizes.")
+                        else:
+                            solara.Warning("One or more files could not be verified. Review the status and details above.")
                 with solara.Card():
                     solara.Markdown("## 1. Add your data")
                     solara.Markdown("**Supported now:** CSV, TSV, delimited TXT, XLSX, JSON, JSON Lines and GeoJSON. Up to 25 MB per file and 100 MB combined per upload batch. Files are profiled separately first.")
