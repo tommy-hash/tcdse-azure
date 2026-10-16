@@ -15,3 +15,5 @@ networkx
 openpyxl
 ipywidgets
 ipydatagrid
+azure-identity
+azure-storage-file-datalake

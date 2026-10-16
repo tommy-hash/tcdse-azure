@@ -27,6 +27,8 @@ dependencies = [
     "ipydatagrid",
     "requests_oauthlib",
     "python-dotenv",
+    "azure-identity",
+    "azure-storage-file-datalake",
 ]
 
 [tool.hatch.version]
