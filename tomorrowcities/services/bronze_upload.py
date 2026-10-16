@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.core.exceptions import AzureError, ResourceExistsError, ResourceNotFoundError
 
 
 def _storage():
@@ -21,7 +21,19 @@ def _storage():
     except ImportError as exc:
         raise RuntimeError("Azure upload dependencies are missing. Rebuild the Container App image.") from exc
     client = DataLakeServiceClient(account_url=account_url, credential=DefaultAzureCredential())
-    return client, client.get_file_system_client(filesystem_name)
+    filesystem = client.get_file_system_client(filesystem_name)
+    try:
+        filesystem.get_file_system_properties()
+    except AzureError as exc:
+        client.close()
+        code = getattr(exc, "error_code", None) or type(exc).__name__
+        raise RuntimeError(
+            f"Could not access ADLS filesystem {filesystem_name!r} at {account_url!r}. "
+            "Check that TCDSE_ADLS_FILESYSTEM is the exact filesystem/container name, "
+            "the account URL belongs to that storage account, and the managed identity has data access. "
+            f"Azure error: {code}: {exc}"
+        ) from exc
+    return client, filesystem
 
 
 
@@ -34,6 +46,12 @@ def _ensure_directories(filesystem, path):
             filesystem.get_directory_client(current).create_directory()
         except ResourceExistsError:
             pass
+        except AzureError as exc:
+            code = getattr(exc, "error_code", None) or type(exc).__name__
+            raise RuntimeError(
+                f"Azure failed while creating ADLS directory {current!r}. "
+                f"Azure error: {code}: {exc}"
+            ) from exc
 
 
 def upload_raw_batch(files, country="Kenya", project="Kalobeyei Settlement"):
@@ -60,7 +78,11 @@ def upload_raw_batch(files, country="Kenya", project="Kalobeyei Settlement"):
             seen_names.add(safe_name)
             path = f"{base}/{safe_name}"
             digest = hashlib.sha256(data).hexdigest()
-            filesystem.get_file_client(path).upload_data(data, overwrite=False)
+            try:
+                filesystem.get_file_client(path).upload_data(data, overwrite=False)
+            except AzureError as exc:
+                code = getattr(exc, "error_code", None) or type(exc).__name__
+                raise RuntimeError(f"Azure failed uploading raw file to {path!r}. Azure error: {code}: {exc}") from exc
             manifest_files.append({
                 "original_filename": name, "stored_filename": safe_name, "path": path,
                 "size_bytes": len(data), "sha256": digest, "processing_status": "uploaded_unprocessed",
@@ -72,7 +94,14 @@ def upload_raw_batch(files, country="Kenya", project="Kalobeyei Settlement"):
             "notes": "Original bytes preserved. No extraction, transformation, or model training was performed.",
         }
         manifest_path = f"bronze/{safe_country}/{safe_project}/{batch_id}/manifest.json"
-        filesystem.get_file_client(manifest_path).upload_data(json.dumps(manifest, indent=2).encode("utf-8"), overwrite=False)
+        try:
+            filesystem.get_file_client(manifest_path).upload_data(json.dumps(manifest, indent=2).encode("utf-8"), overwrite=False)
+        except AzureError as exc:
+            code = getattr(exc, "error_code", None) or type(exc).__name__
+            raise RuntimeError(
+                f"Raw file(s) were uploaded, but manifest creation failed at {manifest_path!r}. "
+                f"Azure error: {code}: {exc}"
+            ) from exc
         return {"batch_id": batch_id, "base_path": base.rsplit("/raw", 1)[0], "manifest_path": manifest_path, "files": manifest_files}
     finally:
         service.close()
