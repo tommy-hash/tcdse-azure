@@ -260,13 +260,22 @@ def Page():
                     raise ValueError("The combined raw upload exceeds 100 MB. Upload smaller batches.")
                 files.append({"name": name, "data": content})
             result = upload_raw_batch(files, country="Kenya", project="Kalobeyei Settlement")
-            set_bronze_notice(f"Uploaded {len(result['files'])} original file(s). Batch: {result['batch_id']}")
-            set_bronze_error("")
-            set_checksum_results([])
+        except Exception as exc:
+            set_bronze_error(f"Bronze upload failed: {exc}")
+            set_bronze_notice("")
+            return
+
+        # Keep a successful upload distinct from a failed catalogue refresh.
+        set_bronze_notice(
+            f"Uploaded {len(result['files'])} original file(s). Batch: {result['batch_id']}. "
+            f"Manifest: {result['manifest_path']}"
+        )
+        set_bronze_error("")
+        set_checksum_results([])
+        try:
             set_bronze_batches(list_raw_batches())
         except Exception as exc:
-            set_bronze_error(f"Bronze import failed: {exc}")
-            set_bronze_notice("")
+            set_bronze_error(f"Upload succeeded, but refreshing import records failed: {exc}")
 
     def verify_bronze_batch(manifest_path):
         try:
