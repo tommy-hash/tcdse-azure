@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+
 
 def _storage():
     account_url = os.getenv("TCDSE_ADLS_ACCOUNT_URL", "").strip()
@@ -22,6 +24,18 @@ def _storage():
     return client, client.get_file_system_client(filesystem_name)
 
 
+
+def _ensure_directories(filesystem, path):
+    """Create each directory level in order; ADLS requires parent paths to exist."""
+    current = ""
+    for part in path.strip("/").split("/"):
+        current = f"{current}/{part}" if current else part
+        try:
+            filesystem.get_directory_client(current).create_directory()
+        except ResourceExistsError:
+            pass
+
+
 def upload_raw_batch(files, country="Kenya", project="Kalobeyei Settlement"):
     """Upload original bytes and a SHA-256 manifest. files is [{name, data: bytes}]."""
     if not files:
@@ -33,6 +47,7 @@ def upload_raw_batch(files, country="Kenya", project="Kalobeyei Settlement"):
     service, filesystem = _storage()
     manifest_files, seen_names = [], set()
     try:
+        _ensure_directories(filesystem, base)
         for item in files:
             name = PurePosixPath(str(item.get("name", "")).replace("\\", "/")).name
             data = item.get("data")
@@ -68,25 +83,29 @@ def list_raw_batches(limit=100):
     service, filesystem = _storage()
     batches = []
     try:
-        for item in filesystem.get_paths(path="bronze", recursive=True):
-            if item.is_directory or not item.name.endswith("/manifest.json"):
-                continue
-            try:
-                raw = filesystem.get_file_client(item.name).download_file().readall()
-                manifest = json.loads(raw.decode("utf-8"))
-                batches.append({
-                    "batch_id": manifest.get("batch_id", ""),
-                    "created_utc": manifest.get("created_utc", ""),
-                    "country": manifest.get("country", ""),
-                    "project": manifest.get("project", ""),
-                    "status": manifest.get("processing_status", "unknown"),
-                    "manifest_path": item.name,
-                    "file_count": len(manifest.get("files", [])),
-                    "total_bytes": sum(int(f.get("size_bytes", 0)) for f in manifest.get("files", [])),
-                    "files": manifest.get("files", []),
-                })
-            except (ValueError, UnicodeDecodeError, KeyError):
-                batches.append({"batch_id": "unreadable-manifest", "manifest_path": item.name, "status": "manifest_error", "file_count": 0, "total_bytes": 0, "files": []})
+        try:
+            paths = filesystem.get_paths(path="bronze", recursive=True)
+            for item in paths:
+                if item.is_directory or not item.name.endswith("/manifest.json"):
+                    continue
+                try:
+                    raw = filesystem.get_file_client(item.name).download_file().readall()
+                    manifest = json.loads(raw.decode("utf-8"))
+                    batches.append({
+                        "batch_id": manifest.get("batch_id", ""),
+                        "created_utc": manifest.get("created_utc", ""),
+                        "country": manifest.get("country", ""),
+                        "project": manifest.get("project", ""),
+                        "status": manifest.get("processing_status", "unknown"),
+                        "manifest_path": item.name,
+                        "file_count": len(manifest.get("files", [])),
+                        "total_bytes": sum(int(f.get("size_bytes", 0)) for f in manifest.get("files", [])),
+                        "files": manifest.get("files", []),
+                    })
+                except (ValueError, UnicodeDecodeError, KeyError):
+                    batches.append({"batch_id": "unreadable-manifest", "manifest_path": item.name, "status": "manifest_error", "file_count": 0, "total_bytes": 0, "files": []})
+        except ResourceNotFoundError:
+            return []
         return sorted(batches, key=lambda x: x.get("created_utc", ""), reverse=True)[:limit]
     finally:
         service.close()
@@ -114,3 +133,4 @@ def verify_raw_batch(manifest_path):
         return results
     finally:
         service.close()
+
