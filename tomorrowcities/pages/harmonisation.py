@@ -10,6 +10,7 @@ import solara
 
 from ..components.file_drop import FileDropMultiple
 from ..services.bronze_upload import list_raw_batches, upload_raw_batch, verify_raw_batch
+from ..services.silver_pipeline import run_silver_inventory
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ROWS = 100_000
@@ -236,6 +237,8 @@ def Page():
     bronze_error, set_bronze_error = solara.use_state("")
     bronze_batches, set_bronze_batches = solara.use_state([])
     checksum_results, set_checksum_results = solara.use_state([])
+    silver_report, set_silver_report = solara.use_state(None)
+    silver_error, set_silver_error = solara.use_state("")
 
     def refresh_bronze():
         try:
@@ -277,6 +280,13 @@ def Page():
         except Exception as exc:
             set_bronze_error(f"Upload succeeded, but refreshing import records failed: {exc}")
 
+    def run_silver_batch(manifest_path):
+        try:
+            report = run_silver_inventory(manifest_path)
+            set_silver_report(report)
+            set_silver_error("")
+        except Exception as exc:
+            set_silver_error(f"Silver processing failed: {exc}")
     def verify_bronze_batch(manifest_path):
         try:
             results = verify_raw_batch(manifest_path)
@@ -439,6 +449,16 @@ def Page():
                                 if batch.get("files"):
                                     solara.DataFrame(pd.DataFrame(batch["files"]))
                                 solara.Button("Verify SHA-256 checksums", on_click=lambda path=batch.get("manifest_path", ""): verify_bronze_batch(path), color="primary")
+                                solara.Button("Run Bronze to Silver inventory", on_click=lambda path=batch.get("manifest_path", ""): run_silver_batch(path), color="primary", disabled=batch.get("status") == "purged")
+                    if silver_error:
+                        solara.Error(silver_error)
+                    if silver_report:
+                        solara.Markdown("### Silver inventory result")
+                        solara.Markdown(f"**Status:** {silver_report.get('processing_status')} · **Source files:** {silver_report.get('source_file_count')} · **Extracted archive members:** {silver_report.get('extracted_member_count')}")
+                        solara.Markdown(f"**Silver report:** `{silver_report.get('report_path')}`")
+                        solara.Markdown("**Candidate shapefile layers:** " + (", ".join(silver_report.get("candidate_shapefile_layers", [])) or "None detected"))
+                        solara.DataFrame(pd.DataFrame([{"source": f.get("source_filename", ""), "type": f.get("source_type", ""), "status": f.get("processing_status", ""), "extracted_members": len(f.get("extracted_members", [])), "warnings": " | ".join(f.get("warnings", []))} for f in silver_report.get("files", [])]))
+                        solara.Markdown("Gold outputs are not generated at this stage; mappings and domain rules must be validated first.")
                     if checksum_results:
                         solara.Markdown("### Checksum verification results")
                         solara.DataFrame(pd.DataFrame(checksum_results))
