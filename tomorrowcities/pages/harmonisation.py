@@ -453,12 +453,41 @@ def Page():
                     if silver_error:
                         solara.Error(silver_error)
                     if silver_report:
-                        solara.Markdown("### Silver inventory result")
-                        solara.Markdown(f"**Status:** {silver_report.get('processing_status')} · **Source files:** {silver_report.get('source_file_count')} · **Extracted archive members:** {silver_report.get('extracted_member_count')}")
-                        solara.Markdown(f"**Silver report:** `{silver_report.get('report_path')}`")
-                        solara.Markdown("**Candidate shapefile layers:** " + (", ".join(silver_report.get("candidate_shapefile_layers", [])) or "None detected"))
-                        solara.DataFrame(pd.DataFrame([{"source": f.get("source_filename", ""), "type": f.get("source_type", ""), "status": f.get("processing_status", ""), "extracted_members": len(f.get("extracted_members", [])), "warnings": " | ".join(f.get("warnings", []))} for f in silver_report.get("files", [])]))
-                        solara.Markdown("Gold outputs are not generated at this stage; mappings and domain rules must be validated first.")
+                        solara.Markdown("## Silver processing summary")
+                        report_status = str(silver_report.get("processing_status", "unknown")).replace("_", " ").title()
+                        with solara.Card():
+                            solara.Markdown(f"### {report_status}")
+                            solara.Markdown("Inventory completed. Review each source file and its warnings below.")
+                            with solara.Row(style={"gap": "10px", "flex-wrap": "wrap"}):
+                                for label, value in [
+                                    ("Source files", silver_report.get("source_file_count", 0)),
+                                    ("Extracted members", silver_report.get("extracted_member_count", 0)),
+                                    ("Candidate GIS layers", len(silver_report.get("candidate_shapefile_layers", []))),
+                                ]:
+                                    with solara.Card(style={"min-width": "145px", "flex": "1"}):
+                                        solara.Markdown(f"**{label}**")
+                                        solara.Markdown(f"## {value}")
+                        solara.Markdown("### Source file results")
+                        for source in silver_report.get("files", []):
+                            with solara.Card():
+                                solara.Markdown(f"**{source.get('source_filename', 'Unnamed source')}**")
+                                solara.Markdown(f"Type: `{source.get('source_type', 'unknown')}` · Status: **{str(source.get('processing_status', 'unknown')).replace('_', ' ').title()}**")
+                                solara.Markdown(f"Extracted archive members: **{len(source.get('extracted_members', []))}**")
+                                warnings = source.get("warnings", [])
+                                if warnings:
+                                    solara.Warning("**Needs attention**\n\n" + "\n".join(f"- {warning}" for warning in warnings))
+                                else:
+                                    solara.Success("No warnings recorded for this source.")
+                        layers = silver_report.get("candidate_shapefile_layers", [])
+                        solara.Markdown("### Candidate shapefile layers")
+                        if layers:
+                            for layer in layers:
+                                solara.Markdown(f"- `{layer}`")
+                        else:
+                            solara.Info("No shapefile layers detected in this run.")
+                        solara.Markdown("**Silver report location**")
+                        solara.Markdown(f"`{silver_report.get('report_path', 'Not reported')}`")
+                        solara.Markdown("> Gold outputs are not generated at this stage. Source layers, coordinate systems, attribute mappings and domain rules must be validated first.")
                     if checksum_results:
                         solara.Markdown("### Checksum verification results")
                         solara.DataFrame(pd.DataFrame(checksum_results))
