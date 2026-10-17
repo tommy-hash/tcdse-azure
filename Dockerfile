@@ -4,7 +4,7 @@ RUN useradd -m -u 1000 user
 
 #USER root
 RUN apt update
-RUN apt -y install gdal-bin libgdal-dev git-lfs
+RUN apt -y install gdal-bin libgdal-dev git-lfs p7zip-full
 
 USER user
 
