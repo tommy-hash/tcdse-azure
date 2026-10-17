@@ -37,7 +37,7 @@ def _storage():
     return client, container
 
 
-def upload_raw_batch(files, country="Kenya", project="Kalobeyei Settlement"):
+def upload_raw_batch(files, country="Kenya", project="Kalobeyei Settlement", progress_hook=None):
     """Upload original bytes and a SHA-256 manifest. files is [{name, data: bytes}]."""
     if not files:
         raise ValueError("Choose at least one file.")
@@ -47,6 +47,8 @@ def upload_raw_batch(files, country="Kenya", project="Kalobeyei Settlement"):
     base = f"bronze/{safe_country}/{safe_project}/{batch_id}"
     client, container = _storage()
     manifest_files, seen_names = [], set()
+    total_bytes = sum(len(item.get("data") or b"") for item in files)
+    completed_before = 0
     try:
         for item in files:
             name = PurePosixPath(str(item.get("name", "")).replace("\\", "/")).name
@@ -61,10 +63,16 @@ def upload_raw_batch(files, country="Kenya", project="Kalobeyei Settlement"):
             path = f"{base}/raw/{safe_name}"
             digest = hashlib.sha256(data).hexdigest()
             try:
-                container.get_blob_client(path).upload_blob(data, overwrite=False)
+                def report_progress(current, total, offset=completed_before, filename=name):
+                    if progress_hook:
+                        progress_hook(min(100.0, ((offset + current) / max(total_bytes, 1)) * 100.0), filename, current, total)
+                container.get_blob_client(path).upload_blob(data, overwrite=False, progress_hook=report_progress)
             except Exception as exc:
                 code = getattr(exc, "error_code", None) or type(exc).__name__
                 raise RuntimeError(f"Azure Blob upload failed for object {path!r}. Azure error: {code}: {exc}") from exc
+            completed_before += len(data)
+            if progress_hook:
+                progress_hook(min(100.0, completed_before / max(total_bytes, 1) * 100.0), name, len(data), len(data))
             manifest_files.append({
                 "original_filename": name, "stored_filename": safe_name, "path": path,
                 "size_bytes": len(data), "sha256": digest, "processing_status": "uploaded_unprocessed",
@@ -138,5 +146,45 @@ def verify_raw_batch(manifest_path):
             except Exception as exc:
                 results.append({"file": item.get("original_filename", item.get("path", "unknown")), "path": item.get("path", ""), "status": "ERROR", "detail": str(exc)})
         return results
+    finally:
+        client.close()
+
+
+
+def purge_raw_batch(manifest_path, confirmation_batch_id, reason):
+    """Delete raw objects for one confirmed batch but retain manifest/audit history."""
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError("Enter a reason for purging this batch.")
+    client, container = _storage()
+    try:
+        manifest_blob = container.get_blob_client(manifest_path)
+        manifest = json.loads(manifest_blob.download_blob().readall().decode("utf-8"))
+        batch_id = manifest.get("batch_id", "")
+        if not batch_id or confirmation_batch_id != batch_id:
+            raise ValueError("Confirmation batch ID does not match. No files were deleted.")
+        if manifest.get("processing_status") == "purged":
+            raise ValueError("This batch has already been purged.")
+        deleted, errors = [], []
+        for item in manifest.get("files", []):
+            path = item.get("path", "")
+            try:
+                container.get_blob_client(path).delete_blob()
+                deleted.append(path)
+            except Exception as exc:
+                errors.append({"path": path, "error": str(exc)})
+        manifest["processing_status"] = "purged" if not errors else "purge_incomplete"
+        manifest["purged_utc"] = datetime.now(timezone.utc).isoformat()
+        manifest["purge_reason"] = reason
+        manifest["purge_deleted_paths"] = deleted
+        manifest["purge_errors"] = errors
+        manifest["downstream_invalidation_status"] = "pending_lineage_implementation"
+        manifest_blob.upload_blob(json.dumps(manifest, indent=2).encode("utf-8"), overwrite=True)
+        audit_path = manifest_path.rsplit("/", 1)[0] + "/purge-audit.json"
+        audit = {"batch_id": batch_id, "manifest_path": manifest_path, "purged_utc": manifest["purged_utc"], "reason": reason, "deleted_paths": deleted, "errors": errors, "downstream_invalidation_status": "pending_lineage_implementation"}
+        container.get_blob_client(audit_path).upload_blob(json.dumps(audit, indent=2).encode("utf-8"), overwrite=True)
+        if errors:
+            raise RuntimeError(f"Purging was incomplete: {len(deleted)} object(s) deleted, {len(errors)} failed. See purge audit.")
+        return {"batch_id": batch_id, "deleted_count": len(deleted), "audit_path": audit_path, "status": manifest["processing_status"]}
     finally:
         client.close()
