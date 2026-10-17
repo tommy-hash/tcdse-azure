@@ -8,7 +8,7 @@ import json
 import os
 import posixpath
 import re
-import zipfile
+import time
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
@@ -62,8 +62,64 @@ def _classify(name):
     }.get(ext, "other")
 
 
+
+def _extract_with_7z(payload, source_name, silver_base, container, report):
+    """Extract an MPK/ZIP package with 7-Zip as the primary extraction engine."""
+    import os
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory(prefix="tcdse-mpk-") as work:
+        root = Path(work)
+        archive_path = root / "package.zip"
+        output_dir = root / "contents"
+        output_dir.mkdir()
+        archive_path.write_bytes(payload)
+        try:
+            result = subprocess.run(
+                ["7z", "x", "-y", "-bd", f"-o{output_dir}", str(archive_path)],
+                capture_output=True, text=True, timeout=300, check=False,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("7-Zip (7z) is not installed in this container image.") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("7-Zip extraction exceeded the 300-second safety limit.") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "No diagnostic output").strip()[-1200:]
+            raise RuntimeError(f"7-Zip extraction failed: {detail}")
+
+        members, total_bytes = [], 0
+        source_stem = PurePosixPath(source_name).stem
+        for current, _, filenames in os.walk(output_dir):
+            for filename in filenames:
+                local_path = Path(current) / filename
+                relative = local_path.relative_to(output_dir).as_posix()
+                safe = _safe_member(relative)
+                if not safe:
+                    report["warnings"].append(f"Skipped unsafe extracted path: {relative}")
+                    continue
+                size = local_path.stat().st_size
+                if size > 250 * 1024 * 1024:
+                    report["warnings"].append(f"Skipped member over 250 MB: {safe}")
+                    continue
+                total_bytes += size
+                if total_bytes > 1024 * 1024 * 1024 or len(members) >= 20000:
+                    raise RuntimeError("Extraction exceeded the 1 GB or 20,000-member safety limit.")
+                target = f"{silver_base}/extracted/{source_stem}/{safe}"
+                with local_path.open("rb") as stream:
+                    data = stream.read()
+                container.get_blob_client(target).upload_blob(data, overwrite=True)
+                members.append({
+                    "member": safe, "silver_path": target, "size_bytes": size,
+                    "sha256": hashlib.sha256(data).hexdigest(), "type": _classify(safe),
+                })
+        report["extracted_members"].extend(members)
+        return len(members)
+
 def run_silver_inventory(manifest_path):
     """Create a Silver inventory and safely extract archive members from one batch."""
+    started = time.perf_counter()
     client, container = _storage()
     try:
         manifest = json.loads(container.get_blob_client(manifest_path).download_blob().readall().decode("utf-8"))
@@ -91,31 +147,13 @@ def run_silver_inventory(manifest_path):
             ext = PurePosixPath(name).suffix.lower()
             if ext in {".mpk", ".mpkx", ".zip"}:
                 try:
-                    import io
-                    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-                        for member in archive.infolist():
-                            if member.is_dir():
-                                continue
-                            safe = _safe_member(member.filename)
-                            if not safe:
-                                report["warnings"].append(f"Skipped unsafe archive path: {member.filename}")
-                                continue
-                            if member.file_size > 250 * 1024 * 1024:
-                                report["warnings"].append(f"Skipped member over 250 MB: {safe}")
-                                continue
-                            # Keep package structure below the source-specific extracted directory.
-                            target = f"{silver_base}/extracted/{PurePosixPath(name).stem}/{safe}"
-                            data = archive.read(member)
-                            container.get_blob_client(target).upload_blob(data, overwrite=True)
-                            report["extracted_members"].append({
-                                "member": safe, "silver_path": target, "size_bytes": len(data),
-                                "sha256": hashlib.sha256(data).hexdigest(), "type": _classify(safe),
-                            })
-                            extracted_count += 1
-                    report["processing_status"] = "extracted" if report["extracted_members"] else "inventoried"
-                except zipfile.BadZipFile:
+                    extracted = _extract_with_7z(payload, name, silver_base, container, report)
+                    report["processing_status"] = "extracted" if extracted else "inventoried"
+                    if not extracted:
+                        report["warnings"].append("7-Zip completed but no files were extracted.")
+                except Exception as extraction_error:
                     report["processing_status"] = "inventory_only"
-                    report["warnings"].append("Package is not a ZIP-readable archive. No extraction was attempted.")
+                    report["warnings"].append(f"7-Zip extraction failed: {extraction_error}")
             elif ext in {".mdb", ".accdb"}:
                 report["processing_status"] = "inventory_only"
                 report["warnings"].append("Access database identified; table/relationship extraction requires a compatible read-only Access driver or mdbtools runtime.")
@@ -130,6 +168,7 @@ def run_silver_inventory(manifest_path):
             "pipeline": "bronze-to-silver-inventory-v1",
             "batch_id": batch_id, "source_manifest": manifest_path,
             "created_utc": datetime.now(timezone.utc).isoformat(),
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
             "silver_base": silver_base, "processing_status": "completed_with_warnings" if any(r["warnings"] for r in file_reports) else "completed",
             "source_file_count": len(file_reports), "extracted_member_count": extracted_count,
             "candidate_shapefile_layers": candidate_layers,
