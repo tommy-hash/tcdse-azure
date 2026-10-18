@@ -476,14 +476,14 @@ def Page():
                         solara.Markdown("### Silver GIS layer inspection")
                         solara.Markdown(f"**Inspected:** {gis_catalogue.get('inspected_layer_count')} / {gis_catalogue.get('candidate_layer_count')} · **Failed:** {gis_catalogue.get('failed_layer_count')} · **Elapsed:** {gis_catalogue.get('elapsed_seconds')} s")
                         solara.Markdown(f"\`**Catalogue:** {gis_catalogue.get('report_path')}\`")
-                        solara.DataFrame(pd.DataFrame([{"layer": item.get("layer_path"), "status": item.get("inspection_status"), "features": item.get("feature_count"), "geometry": item.get("geometry_type"), "CRS": item.get("crs_authority") or item.get("crs_name"), "fields": item.get("field_count"), "warnings": " | ".join(item.get("warnings", []))} for item in gis_catalogue.get("layers", [])]))
+                        solara.DataFrame(pd.DataFrame([{"layer": item.get("layer_path"), "status": item.get("inspection_status"), "features": item.get("feature_count"), "geometry": item.get("geometry_type"), "CRS": item.get("crs_authority") or item.get("crs_name"), "fields": item.get("field_count"), "initial suitability": (item.get("initial_suitability") or {}).get("category"), "warnings": " | ".join(item.get("warnings", []))} for item in gis_catalogue.get("layers", [])]))
                         with solara.Details("Inspect field definitions", expand=False):
                             for item in gis_catalogue.get("layers", []):
                                 solara.Markdown(f"**{item.get('layer_path')}**")
                                 if item.get("fields"):
                                     solara.DataFrame(pd.DataFrame(item["fields"]))
                                 else:
-                                    solara.Markdown("No field definitions returned.")
+                                    solara.Warning("No field definitions returned; treat this layer as not ready for analytical use.")
 
                     if checksum_results:
                         solara.Markdown("### Checksum verification results")
