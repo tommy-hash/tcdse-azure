@@ -202,3 +202,145 @@ def run_silver_inventory(manifest_path):
         return report_doc | {"report_path": report_path}
     finally:
         client.close()
+
+
+def run_silver_gis_inspection(inventory_path):
+    """Inspect extracted shapefiles with read-only GDAL/OGR and persist a Silver catalogue."""
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    started = time.perf_counter()
+    client, container = _storage()
+    try:
+        inventory = json.loads(
+            container.get_blob_client(inventory_path).download_blob().readall().decode("utf-8")
+        )
+        all_members = [
+            member
+            for file_report in inventory.get("files", [])
+            for member in file_report.get("extracted_members", [])
+        ]
+        shp_members = [
+            member for member in all_members
+            if PurePosixPath(member.get("member", "")).suffix.lower() == ".shp"
+        ]
+        ogrinfo = shutil.which("ogrinfo")
+        catalogue = []
+        if not ogrinfo:
+            raise RuntimeError("GDAL/OGR command 'ogrinfo' is not installed in this container.")
+
+        with tempfile.TemporaryDirectory(prefix="tcdse-gis-inspection-") as work:
+            root = Path(work)
+            for shp in shp_members:
+                member_path = PurePosixPath(shp["member"])
+                parent = member_path.parent
+                stem = member_path.stem
+                # A shapefile is a set of companion files. Download same-folder, same-stem
+                # members together so OGR can read attributes, projection and geometry.
+                companions = [
+                    item for item in all_members
+                    if PurePosixPath(item.get("member", "")).parent == parent
+                    and PurePosixPath(item.get("member", "")).stem.lower() == stem.lower()
+                ]
+                local_dir = root / str(parent)
+                local_dir.mkdir(parents=True, exist_ok=True)
+                for item in companions:
+                    safe = _safe_member(item.get("member", ""))
+                    if not safe:
+                        continue
+                    local_path = root / safe
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    data = container.get_blob_client(item["silver_path"]).download_blob().readall()
+                    local_path.write_bytes(data)
+
+                local_shp = root / shp["member"]
+                record = {
+                    "layer_path": shp["member"],
+                    "silver_path": shp.get("silver_path"),
+                    "source_filename": next(
+                        (fr.get("source_filename") for fr in inventory.get("files", [])
+                         if any(m.get("member") == shp["member"] for m in fr.get("extracted_members", []))),
+                        None,
+                    ),
+                    "inspection_status": "failed",
+                    "feature_count": None,
+                    "geometry_type": None,
+                    "crs_name": None,
+                    "crs_authority": None,
+                    "fields": [],
+                    "field_count": 0,
+                    "warnings": [],
+                }
+                try:
+                    result = subprocess.run(
+                        [ogrinfo, "-ro", "-so", "-al", "-json", str(local_shp)],
+                        capture_output=True, text=True, timeout=120, check=False,
+                    )
+                    if result.returncode != 0:
+                        detail = (result.stderr or result.stdout or "ogrinfo returned a non-zero exit code").strip()
+                        record["warnings"].append(detail[-1500:])
+                    else:
+                        parsed = json.loads(result.stdout)
+                        layers = parsed.get("layers", [])
+                        if not layers:
+                            record["warnings"].append("OGR returned no layers for this shapefile.")
+                        else:
+                            layer = layers[0]
+                            record["feature_count"] = layer.get("featureCount")
+                            geometry_fields = layer.get("geometryFields", [])
+                            if geometry_fields:
+                                record["geometry_type"] = geometry_fields[0].get("type")
+                                crs = geometry_fields[0].get("coordinateSystem", {})
+                            else:
+                                crs = layer.get("coordinateSystem", {})
+                            if isinstance(crs, dict):
+                                record["crs_name"] = crs.get("name")
+                                ids = crs.get("id", {})
+                                if isinstance(ids, dict):
+                                    authority = ids.get("authority")
+                                    code = ids.get("code")
+                                    if authority and code is not None:
+                                        record["crs_authority"] = f"{authority}:{code}"
+                            record["fields"] = [
+                                {
+                                    "name": field.get("name"),
+                                    "type": field.get("type"),
+                                    "nullable": field.get("nullable"),
+                                    "width": field.get("width"),
+                                }
+                                for field in layer.get("fields", [])
+                            ]
+                            record["field_count"] = len(record["fields"])
+                            record["inspection_status"] = "inspected"
+                except subprocess.TimeoutExpired:
+                    record["warnings"].append("OGR inspection exceeded the 120-second timeout.")
+                except (json.JSONDecodeError, OSError, KeyError, TypeError) as exc:
+                    record["warnings"].append(f"Could not parse OGR inspection output: {exc}")
+                catalogue.append(record)
+
+        inspected = sum(1 for item in catalogue if item["inspection_status"] == "inspected")
+        result_doc = {
+            "pipeline": "silver-gis-inspection-v1",
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "source_inventory": inventory_path,
+            "silver_base": inventory.get("silver_base"),
+            "candidate_layer_count": len(shp_members),
+            "inspected_layer_count": inspected,
+            "failed_layer_count": len(catalogue) - inspected,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "layers": catalogue,
+            "limitations": [
+                "Read-only metadata inspection only; no geometry repair or reprojection was performed.",
+                "Feature counts and CRS are reported only when GDAL/OGR returns them.",
+                "This catalogue does not establish semantic suitability for a Gold output; attributes and domain meaning still require review.",
+            ],
+        }
+        report_path = f"{inventory.get('silver_base', 'silver')}/silver_gis_catalogue.json"
+        container.get_blob_client(report_path).upload_blob(
+            json.dumps(result_doc, indent=2).encode("utf-8"), overwrite=True
+        )
+        return result_doc | {"report_path": report_path}
+    finally:
+        client.close()
