@@ -423,6 +423,53 @@ def _gold_readiness_matrix(layers):
     return result
 
 
+
+def _quality_resolution_actions(record):
+    """Provide non-destructive next actions based on observed QA evidence."""
+    actions = []
+    for check in record.get("identifier_checks", []):
+        if check.get("duplicate_non_null_count", 0):
+            actions.append({
+                "issue": "repeated_identifier",
+                "field": check.get("field"),
+                "evidence": check.get("duplicate_values_sample", []),
+                "recommended_action": "Inspect affected records and source schema; determine whether the field is a feature key, parent/join key, or non-unique label. Do not delete or renumber records automatically.",
+                "status": "requires_human_review",
+            })
+        if check.get("null_count", 0):
+            actions.append({
+                "issue": "null_identifier",
+                "field": check.get("field"),
+                "evidence": {"null_count": check.get("null_count")},
+                "recommended_action": "Confirm whether the identifier is required. Preserve nulls until a documented source-based rule exists.",
+                "status": "requires_human_review",
+            })
+    geometry = record.get("geometry", {})
+    if geometry.get("invalid_count", 0):
+        actions.append({
+            "issue": "invalid_geometry",
+            "evidence": {"count": geometry.get("invalid_count"), "feature_indices_sample": geometry.get("invalid_feature_indices_sample", [])},
+            "recommended_action": "Inspect invalid features and compare with source GIS. Repair only in a separate derived copy after review; preserve original geometry and record method.",
+            "status": "requires_human_review",
+        })
+    if len(geometry.get("types", {})) > 1:
+        actions.append({
+            "issue": "mixed_geometry_types",
+            "evidence": geometry.get("types", {}),
+            "recommended_action": "Review the intended output contract. Separate by geometry type or normalize only when the target schema explicitly permits it.",
+            "status": "requires_human_review",
+        })
+    crs = record.get("crs", {})
+    if not crs.get("present"):
+        actions.append({
+            "issue": "missing_crs",
+            "evidence": crs,
+            "recommended_action": "Find authoritative CRS metadata from the source package/provider; do not guess or reproject until confirmed.",
+            "status": "requires_human_review",
+        })
+    return actions
+
+
 def run_silver_gis_quality_assessment(catalogue_path):
     """Profile extracted shapefiles and produce a conservative Gold-readiness report."""
     import tempfile
@@ -513,10 +560,13 @@ def run_silver_gis_quality_assessment(catalogue_path):
                         invalid_count = int((~geom.is_valid & ~geom.is_empty & geom.notna()).sum())
                         geom_types = {str(k): int(v) for k, v in geom.geom_type.value_counts(dropna=False).items()}
                         bounds = [float(v) for v in gdf.total_bounds] if actual_count else []
+                        invalid_mask = (~geom.is_valid & ~geom.is_empty & geom.notna())
+                        invalid_indices = [str(idx) for idx in gdf.index[invalid_mask].tolist()[:100]]
                         record["geometry"] = {
                             "column": geom_col, "types": geom_types, "bounds": bounds,
                             "null_count": null_geom_count, "empty_count": empty_count,
-                            "invalid_count": invalid_count,
+                            "invalid_count": invalid_count, "invalid_feature_indices_sample": invalid_indices,
+                            "invalid_indices_truncated": invalid_count > len(invalid_indices),
                         }
                         if null_geom_count:
                             record["warnings"].append(f"{null_geom_count} null geometries.")
@@ -556,9 +606,22 @@ def run_silver_gis_quality_assessment(catalogue_path):
                     for col in identifier_fields:
                         non_null = gdf[col].dropna()
                         duplicate_count = int(non_null.duplicated().sum())
+                        duplicate_values = non_null[non_null.duplicated(keep=False)].value_counts(dropna=True)
+                        duplicate_examples = [
+                            {"value": str(value)[:160], "occurrences": int(count)}
+                            for value, count in duplicate_values.head(100).items()
+                        ]
+                        duplicate_indices = [
+                            str(idx) for idx in gdf.index[gdf[col].notna() & gdf[col].duplicated(keep=False)].tolist()[:100]
+                        ]
                         record.setdefault("identifier_checks", []).append({
                             "field": col, "null_count": int(gdf[col].isna().sum()),
                             "duplicate_non_null_count": duplicate_count,
+                            "duplicate_distinct_value_count": int(len(duplicate_values)),
+                            "duplicate_values_sample": duplicate_examples,
+                            "affected_feature_indices_sample": duplicate_indices,
+                            "indices_truncated": duplicate_count > len(duplicate_indices),
+                            "interpretation": "Repeated identifiers are flagged for review; they are not assumed to be duplicate features.",
                         })
                         if duplicate_count:
                             record["warnings"].append(f"Identifier field {col} has {duplicate_count} duplicate non-null values.")
@@ -570,6 +633,7 @@ def run_silver_gis_quality_assessment(catalogue_path):
                         record["blockers"].append("Layer contains zero features.")
                     if not columns:
                         record["blockers"].append("No non-geometry attribute fields found.")
+                    record["resolution_actions"] = _quality_resolution_actions(record)
                     record["qa_status"] = "blocked" if record["blockers"] else ("review_warnings" if record["warnings"] else "passed_initial_checks")
                 except Exception as exc:
                     record["blockers"].append(f"GeoPandas could not read or profile the layer: {type(exc).__name__}: {exc}"[:1000])

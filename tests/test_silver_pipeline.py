@@ -76,3 +76,36 @@ def test_gold_readiness_matrix_keeps_candidates_unapproved():
     assert lines["candidate_count"] == 1
     assert polygons["readiness"] == "not_ready"
     assert polygons["decision"] == "human_review_required"
+
+
+from tomorrowcities.services.silver_pipeline import _quality_resolution_actions
+
+
+def test_quality_resolution_actions_never_auto_repairs_or_deletes():
+    record = {
+        "identifier_checks": [{
+            "field": "Id",
+            "duplicate_non_null_count": 2,
+            "duplicate_values_sample": [{"value": "7", "occurrences": 3}],
+            "null_count": 0,
+        }],
+        "geometry": {
+            "invalid_count": 1,
+            "invalid_feature_indices_sample": ["4"],
+            "types": {"Polygon": 8, "MultiPolygon": 2},
+        },
+        "crs": {"present": False},
+    }
+    actions = _quality_resolution_actions(record)
+    issues = {action["issue"] for action in actions}
+    assert {"repeated_identifier", "invalid_geometry", "mixed_geometry_types", "missing_crs"} <= issues
+    assert all(action["status"] == "requires_human_review" for action in actions)
+    assert all("automatically" in action["recommended_action"] or "only" in action["recommended_action"] or "do not" in action["recommended_action"] for action in actions)
+
+
+def test_quality_resolution_actions_empty_for_clean_record():
+    assert _quality_resolution_actions({
+        "identifier_checks": [],
+        "geometry": {"invalid_count": 0, "types": {"Polygon": 4}},
+        "crs": {"present": True},
+    }) == []
