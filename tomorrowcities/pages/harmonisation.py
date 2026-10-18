@@ -501,7 +501,19 @@ def Page():
                         solara.Markdown("### Silver GIS quality assessment")
                         solara.Markdown(f"**Layers:** {gis_quality_report.get('layer_count')} · **Blocked:** {gis_quality_report.get('blocked_layer_count')} · **With warnings:** {gis_quality_report.get('layers_with_warnings')} · **Elapsed:** {gis_quality_report.get('elapsed_seconds')} s")
                         solara.Markdown("Quality report: " + str(gis_quality_report.get("report_path")))
-                        solara.DataFrame(pd.DataFrame([{"layer": item.get("layer_path"), "QA status": item.get("qa_status"), "features": item.get("feature_count_actual"), "CRS": item.get("crs", {}).get("authority") or item.get("crs", {}).get("value"), "null/empty geometry": (item.get("geometry", {}).get("null_count", 0) + item.get("geometry", {}).get("empty_count", 0)), "invalid geometry": item.get("geometry", {}).get("invalid_count"), "fields": len(item.get("fields", [])), "blockers": " | ".join(item.get("blockers", [])), "warnings": " | ".join(item.get("warnings", []))} for item in gis_quality_report.get("layers", [])]))
+                        solara.DataFrame(pd.DataFrame([{"layer": item.get("layer_path"), "QA status": item.get("qa_status"), "features": item.get("feature_count_actual"), "CRS": item.get("crs", {}).get("authority") or item.get("crs", {}).get("value"), "null/empty geometry": (item.get("geometry", {}).get("null_count", 0) + item.get("geometry", {}).get("empty_count", 0)), "invalid geometry": item.get("geometry", {}).get("invalid_count"), "geometry types": str(item.get("geometry", {}).get("types", {})), "fields": len(item.get("fields", [])), "resolution actions": len(item.get("resolution_actions", [])), "blockers": " | ".join(item.get("blockers", [])), "warnings": " | ".join(item.get("warnings", []))} for item in gis_quality_report.get("layers", [])]))
+                        with solara.Details("Warning evidence and recommended resolution", expand=False):
+                            for item in gis_quality_report.get("layers", []):
+                                if item.get("resolution_actions"):
+                                    solara.Markdown("**" + str(item.get("layer_path")) + "**")
+                                    for action in item.get("resolution_actions", []):
+                                        solara.Markdown("**" + str(action.get("issue")) + "** — " + str(action.get("recommended_action")))
+                                        if action.get("evidence"):
+                                            solara.DataFrame(pd.json_normalize(action.get("evidence")) if isinstance(action.get("evidence"), (dict, list)) else pd.DataFrame([{"evidence": action.get("evidence")}]))
+                                if item.get("identifier_checks"):
+                                    solara.Markdown("**Identifier checks: " + str(item.get("layer_path")) + "**")
+                                    solara.DataFrame(pd.DataFrame([{"field": chk.get("field"), "nulls": chk.get("null_count"), "duplicate rows": chk.get("duplicate_non_null_count"), "distinct duplicated values": chk.get("duplicate_distinct_value_count"), "example duplicate values": str(chk.get("duplicate_values_sample", [])), "affected feature indices": str(chk.get("affected_feature_indices_sample", []))} for chk in item.get("identifier_checks", [])]))
+
                         solara.Markdown("### Gold readiness — candidate screening only")
                         solara.DataFrame(pd.DataFrame([{"Gold artifact": item.get("gold_artifact"), "candidate layers": item.get("candidate_count"), "readiness": item.get("readiness"), "decision": item.get("decision"), "reason": item.get("reason")} for item in gis_quality_report.get("gold_readiness", [])]))
                         with solara.Details("Field completeness and sample values", expand=False):
