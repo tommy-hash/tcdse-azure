@@ -10,7 +10,7 @@ import solara
 
 from ..components.file_drop import FileDropMultiple
 from ..services.bronze_upload import list_raw_batches, upload_raw_batch, verify_raw_batch
-from ..services.silver_pipeline import run_silver_inventory
+from ..services.silver_pipeline import run_silver_inventory, run_silver_gis_inspection
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ROWS = 100_000
@@ -239,6 +239,8 @@ def Page():
     checksum_results, set_checksum_results = solara.use_state([])
     silver_report, set_silver_report = solara.use_state(None)
     silver_error, set_silver_error = solara.use_state("")
+    gis_catalogue, set_gis_catalogue = solara.use_state(None)
+    gis_error, set_gis_error = solara.use_state("")
 
     def refresh_bronze():
         try:
@@ -287,6 +289,14 @@ def Page():
             set_silver_error("")
         except Exception as exc:
             set_silver_error(f"Silver processing failed: {exc}")
+    def run_gis_inspection(inventory_path):
+        try:
+            catalogue = run_silver_gis_inspection(inventory_path)
+            set_gis_catalogue(catalogue)
+            set_gis_error("")
+        except Exception as exc:
+            set_gis_error(f"Silver GIS inspection failed: {exc}")
+
     def verify_bronze_batch(manifest_path):
         try:
             results = verify_raw_batch(manifest_path)
@@ -458,7 +468,23 @@ def Page():
                         solara.Markdown(f"**Silver report:** `{silver_report.get('report_path')}`")
                         solara.Markdown("**Candidate shapefile layers:** " + (", ".join(silver_report.get("candidate_shapefile_layers", [])) or "None detected"))
                         solara.DataFrame(pd.DataFrame([{"source": f.get("source_filename", ""), "type": f.get("source_type", ""), "status": f.get("processing_status", ""), "extracted_members": len(f.get("extracted_members", [])), "warnings": " | ".join(f.get("warnings", []))} for f in silver_report.get("files", [])]))
+                        solara.Button("Inspect Silver GIS layers", on_click=lambda path=silver_report.get("report_path", ""): run_gis_inspection(path), color="primary", disabled=not silver_report.get("report_path"))
                         solara.Markdown("Gold outputs are not generated at this stage; mappings and domain rules must be validated first.")
+                    if gis_error:
+                        solara.Error(gis_error)
+                    if gis_catalogue:
+                        solara.Markdown("### Silver GIS layer inspection")
+                        solara.Markdown(f"**Inspected:** {gis_catalogue.get('inspected_layer_count')} / {gis_catalogue.get('candidate_layer_count')} · **Failed:** {gis_catalogue.get('failed_layer_count')} · **Elapsed:** {gis_catalogue.get('elapsed_seconds')} s")
+                        solara.Markdown(f"\`**Catalogue:** {gis_catalogue.get('report_path')}\`")
+                        solara.DataFrame(pd.DataFrame([{"layer": item.get("layer_path"), "status": item.get("inspection_status"), "features": item.get("feature_count"), "geometry": item.get("geometry_type"), "CRS": item.get("crs_authority") or item.get("crs_name"), "fields": item.get("field_count"), "warnings": " | ".join(item.get("warnings", []))} for item in gis_catalogue.get("layers", [])]))
+                        with solara.Details("Inspect field definitions", expand=False):
+                            for item in gis_catalogue.get("layers", []):
+                                solara.Markdown(f"**{item.get('layer_path')}**")
+                                if item.get("fields"):
+                                    solara.DataFrame(pd.DataFrame(item["fields"]))
+                                else:
+                                    solara.Markdown("No field definitions returned.")
+
                     if checksum_results:
                         solara.Markdown("### Checksum verification results")
                         solara.DataFrame(pd.DataFrame(checksum_results))
