@@ -204,6 +204,36 @@ def run_silver_inventory(manifest_path):
         client.close()
 
 
+
+
+def _parse_ogrinfo_summary(output):
+    """Parse common GDAL/OGR text summary output without mistaking CRS lines for fields."""
+    feature_match = re.search(r"^\s*Feature Count:\s*(\d+)\s*$", output, re.MULTILINE)
+    geometry_match = re.search(r"^\s*Geometry:\s*(.+?)\s*$", output, re.MULTILINE)
+    epsg_match = re.search(r'ID\["EPSG",\s*(\d+)\]', output)
+    srs_match = re.search(r"^\s*(?:Layer SRS WKT|Layer SRS):\s*\n\s*([^\n]+)", output, re.MULTILINE)
+    fields = []
+    field_types = r"(?:Integer64|Integer|Real|String|DateTime|Date|Time|Binary|IntegerList|RealList|StringList)"
+    for line in output.splitlines():
+        match = re.match(
+            rf"^\s*([^:\n]+):\s+({field_types})\b(?:\s+\(([^)]*)\))?\s*$",
+            line,
+        )
+        if match:
+            fields.append({
+                "name": match.group(1).strip(),
+                "type": match.group(2).strip(),
+                "width": match.group(3),
+            })
+    return {
+        "feature_count": int(feature_match.group(1)) if feature_match else None,
+        "geometry_type": geometry_match.group(1).strip() if geometry_match else None,
+        "crs_authority": f"EPSG:{epsg_match.group(1)}" if epsg_match else None,
+        "crs_name": srs_match.group(1).strip() if srs_match else None,
+        "fields": fields,
+    }
+
+
 def run_silver_gis_inspection(inventory_path):
     """Inspect extracted shapefiles with read-only GDAL/OGR and persist a Silver catalogue."""
     import shutil
@@ -282,22 +312,15 @@ def run_silver_gis_inspection(inventory_path):
                         detail = (result.stderr or result.stdout or "ogrinfo returned a non-zero exit code").strip()
                         record["warnings"].append(detail[-1500:])
                     else:
-                        output = result.stdout
-                        feature_match = re.search(r"Feature Count:\s*(\d+)", output)
-                        geometry_match = re.search(r"Geometry:\s*(.+)", output)
-                        record["feature_count"] = int(feature_match.group(1)) if feature_match else None
-                        record["geometry_type"] = geometry_match.group(1).strip() if geometry_match else None
-                        epsg_match = re.search(r'ID\["EPSG",\s*(\d+)\]', output)
-                        record["crs_authority"] = f"EPSG:{epsg_match.group(1)}" if epsg_match else None
-                        srs_match = re.search(r"Layer SRS WKT:\s*\n\s*([^\n]+)", output)
-                        record["crs_name"] = srs_match.group(1).strip() if srs_match else None
-                        fields = []
-                        for line in output.splitlines():
-                            match = re.match(r"\s+([^:]+):\s+([^ (]+)(?:\s+\(([^)]*)\))?", line)
-                            if match:
-                                fields.append({"name": match.group(1).strip(), "type": match.group(2).strip(), "width": match.group(3)})
-                        record["fields"] = fields
-                        record["field_count"] = len(fields)
+                        parsed = _parse_ogrinfo_summary(result.stdout)
+                        record["feature_count"] = parsed["feature_count"]
+                        record["geometry_type"] = parsed["geometry_type"]
+                        record["crs_authority"] = parsed["crs_authority"]
+                        record["crs_name"] = parsed["crs_name"]
+                        record["fields"] = parsed["fields"]
+                        record["field_count"] = len(record["fields"])
+                        if record["field_count"] == 0:
+                            record["warnings"].append("OGR inspection succeeded but no attribute fields were parsed; inspect raw ogrinfo output.")
                         record["inspection_status"] = "inspected"
                 except subprocess.TimeoutExpired:
                     record["warnings"].append("OGR inspection exceeded the 120-second timeout.")
