@@ -234,6 +234,29 @@ def _parse_ogrinfo_summary(output):
     }
 
 
+
+def _initial_layer_suitability(layer_path, geometry_type, field_count):
+    """Transparent name/geometry-based triage hint, not an approval decision."""
+    name = PurePosixPath(layer_path).stem.lower()
+    if "building" in name:
+        category, reason = "building_exposure_candidate", "Name suggests building footprints; confirm geometry, attributes, date and completeness."
+    elif any(token in name for token in ("waterway", "lagga", "drain")):
+        category, reason = "hydrology_context_candidate", "Name suggests drainage or waterways; confirm hydrological meaning and CRS."
+    elif any(token in name for token in ("road", "path")):
+        category, reason = "access_network_candidate", "Name suggests transport infrastructure; confirm road class, access status and topology."
+    elif any(token in name for token in ("health", "school", "shop", "place", "tank", "electricity", "power")):
+        category, reason = "critical_facility_or_infrastructure_candidate", "Name suggests a facility or infrastructure asset; validate attributes and operational status."
+    elif any(token in name for token in ("land_use", "land_uses", "agricultural", "boundary")):
+        category, reason = "land_use_or_extent_candidate", "Name suggests land use or settlement extent; verify class definitions and geometry."
+    else:
+        category, reason = "context_candidate", "Layer name alone does not establish its analytical role; inspect fields and sample records."
+    if not geometry_type:
+        reason += " Geometry type is unknown."
+    if field_count == 0:
+        reason += " No attribute fields were parsed; do not use analytically until corrected."
+    return {"category": category, "reason": reason, "approval": "not_approved"}
+
+
 def run_silver_gis_inspection(inventory_path):
     """Inspect extracted shapefiles with read-only GDAL/OGR and persist a Silver catalogue."""
     import shutil
@@ -326,6 +349,16 @@ def run_silver_gis_inspection(inventory_path):
                     record["warnings"].append("OGR inspection exceeded the 120-second timeout.")
                 except (OSError, KeyError, TypeError) as exc:
                     record["warnings"].append(f"Could not parse OGR inspection output: {exc}")
+                if record["inspection_status"] == "inspected":
+                    if record.get("feature_count") == 0:
+                        record["warnings"].append("Layer contains zero features.")
+                    if not record.get("crs_authority") and not record.get("crs_name"):
+                        record["warnings"].append("CRS was not identified in the OGR summary; verify the .prj file and coordinate reference system.")
+                    if not record.get("geometry_type"):
+                        record["warnings"].append("Geometry type was not identified in the OGR summary.")
+                    record["initial_suitability"] = _initial_layer_suitability(record["layer_path"], record.get("geometry_type"), record.get("field_count", 0))
+                else:
+                    record["initial_suitability"] = {"category": "needs_review", "reason": "Layer metadata could not be fully inspected.", "approval": "not_approved"}
                 catalogue.append(record)
 
         inspected = sum(1 for item in catalogue if item["inspection_status"] == "inspected")
