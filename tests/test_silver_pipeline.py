@@ -25,3 +25,37 @@ def test_safe_member_normalizes_package_paths():
 )
 def test_classifies_common_kalobeyei_sources(name, expected):
     assert _classify(name) == expected
+
+
+from tomorrowcities.services.silver_pipeline import _parse_ogrinfo_summary
+
+
+def test_parse_ogrinfo_summary_extracts_fields_and_metadata():
+    output = '''INFO: Open of "roads.shp"
+Layer name: roads
+Geometry: Line String
+Feature Count: 802
+Layer SRS WKT:
+PROJCRS["WGS 84 / UTM zone 36S",
+    ID["EPSG", 32736]]
+road_id: Integer (9.0)
+road_name: String (80.0)
+length_m: Real (12.3)
+'''
+    parsed = _parse_ogrinfo_summary(output)
+    assert parsed["feature_count"] == 802
+    assert parsed["geometry_type"] == "Line String"
+    assert parsed["crs_authority"] == "EPSG:32736"
+    assert [field["name"] for field in parsed["fields"]] == ["road_id", "road_name", "length_m"]
+
+
+def test_parse_ogrinfo_summary_does_not_treat_geometry_or_crs_as_fields():
+    output = '''Geometry: Polygon
+Feature Count: 1
+Layer SRS WKT:
+GEOGCRS["WGS 84", ID["EPSG", 4326]]
+'''
+    parsed = _parse_ogrinfo_summary(output)
+    assert parsed["fields"] == []
+    assert parsed["geometry_type"] == "Polygon"
+    assert parsed["crs_authority"] == "EPSG:4326"
