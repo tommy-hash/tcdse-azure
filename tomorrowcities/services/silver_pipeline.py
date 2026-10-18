@@ -73,10 +73,20 @@ def _extract_with_7z(payload, source_name, silver_base, container, report):
 
     with tempfile.TemporaryDirectory(prefix="tcdse-mpk-") as work:
         root = Path(work)
-        archive_path = root / "package.zip"
+        # Keep the original extension for diagnostics; 7-Zip detects the real format by signature.
+        suffix = PurePosixPath(source_name).suffix or ".mpk"
+        archive_path = root / f"package{suffix}"
         output_dir = root / "contents"
         output_dir.mkdir()
         archive_path.write_bytes(payload)
+        # 7z signature: 37 7A BC AF 27 1C. Do not assume an MPK is a ZIP file.
+        signature = payload[:6]
+        if signature == bytes.fromhex("377ABCAF271C"):
+            report["archive_format"] = "7z"
+        elif payload.startswith(b"PK\\x03\\x04") or payload.startswith(b"PK\\x05\\x06") or payload.startswith(b"PK\\x07\\x08"):
+            report["archive_format"] = "zip"
+        else:
+            report["archive_format"] = "unknown"
         seven_zip = shutil.which("7z") or shutil.which("7zz")
         if not seven_zip:
             raise RuntimeError("No 7-Zip executable found (checked 7z and 7zz).")
