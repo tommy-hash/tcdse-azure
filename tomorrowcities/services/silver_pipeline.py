@@ -83,7 +83,7 @@ def _extract_with_7z(payload, source_name, silver_base, container, report):
         signature = payload[:6]
         if signature == bytes.fromhex("377ABCAF271C"):
             report["archive_format"] = "7z"
-        elif payload.startswith(b"PK\\x03\\x04") or payload.startswith(b"PK\\x05\\x06") or payload.startswith(b"PK\\x07\\x08"):
+        elif any(payload.startswith(bytes.fromhex(sig)) for sig in ("504B0304", "504B0506", "504B0708")):
             report["archive_format"] = "zip"
         else:
             report["archive_format"] = "unknown"
