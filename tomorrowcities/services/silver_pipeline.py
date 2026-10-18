@@ -66,6 +66,7 @@ def _classify(name):
 def _extract_with_7z(payload, source_name, silver_base, container, report):
     """Extract an MPK/ZIP package with 7-Zip as the primary extraction engine."""
     import os
+    import shutil
     import subprocess
     import tempfile
     from pathlib import Path
@@ -76,9 +77,12 @@ def _extract_with_7z(payload, source_name, silver_base, container, report):
         output_dir = root / "contents"
         output_dir.mkdir()
         archive_path.write_bytes(payload)
+        seven_zip = shutil.which("7z") or shutil.which("7zz")
+        if not seven_zip:
+            raise RuntimeError("No 7-Zip executable found (checked 7z and 7zz).")
         try:
             result = subprocess.run(
-                ["7z", "x", "-y", "-bd", f"-o{output_dir}", str(archive_path)],
+                [seven_zip, "x", "-y", "-bd", f"-o{output_dir}", str(archive_path)],
                 capture_output=True, text=True, timeout=300, check=False,
             )
         except FileNotFoundError as exc:
@@ -98,6 +102,9 @@ def _extract_with_7z(payload, source_name, silver_base, container, report):
                 safe = _safe_member(relative)
                 if not safe:
                     report["warnings"].append(f"Skipped unsafe extracted path: {relative}")
+                    continue
+                if local_path.is_symlink() or not local_path.resolve().is_relative_to(output_dir.resolve()):
+                    report["warnings"].append(f"Skipped symlink or path outside extraction directory: {relative}")
                     continue
                 size = local_path.stat().st_size
                 if size > 250 * 1024 * 1024:
