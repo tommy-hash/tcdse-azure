@@ -10,7 +10,7 @@ import solara
 
 from ..components.file_drop import FileDropMultiple
 from ..services.bronze_upload import list_raw_batches, upload_raw_batch, verify_raw_batch
-from ..services.silver_pipeline import run_silver_inventory, run_silver_gis_inspection
+from ..services.silver_pipeline import run_silver_inventory, run_silver_gis_inspection, run_silver_gis_quality_assessment
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ROWS = 100_000
@@ -241,6 +241,8 @@ def Page():
     silver_error, set_silver_error = solara.use_state("")
     gis_catalogue, set_gis_catalogue = solara.use_state(None)
     gis_error, set_gis_error = solara.use_state("")
+    gis_quality_report, set_gis_quality_report = solara.use_state(None)
+    gis_quality_error, set_gis_quality_error = solara.use_state("")
 
     def refresh_bronze():
         try:
@@ -296,6 +298,14 @@ def Page():
             set_gis_error("")
         except Exception as exc:
             set_gis_error(f"Silver GIS inspection failed: {exc}")
+
+    def run_gis_quality(catalogue_path):
+        try:
+            report = run_silver_gis_quality_assessment(catalogue_path)
+            set_gis_quality_report(report)
+            set_gis_quality_error("")
+        except Exception as exc:
+            set_gis_quality_error(f"Silver GIS quality assessment failed: {exc}")
 
     def verify_bronze_batch(manifest_path):
         try:
@@ -484,6 +494,24 @@ def Page():
                                     solara.DataFrame(pd.DataFrame(item["fields"]))
                                 else:
                                     solara.Warning("No field definitions returned; treat this layer as not ready for analytical use.")
+                        solara.Button("Run GIS quality assessment", on_click=lambda path=gis_catalogue.get("report_path", ""): run_gis_quality(path), color="primary", disabled=not gis_catalogue.get("report_path"))
+                    if gis_quality_error:
+                        solara.Error(gis_quality_error)
+                    if gis_quality_report:
+                        solara.Markdown("### Silver GIS quality assessment")
+                        solara.Markdown(f"**Layers:** {gis_quality_report.get('layer_count')} · **Blocked:** {gis_quality_report.get('blocked_layer_count')} · **With warnings:** {gis_quality_report.get('layers_with_warnings')} · **Elapsed:** {gis_quality_report.get('elapsed_seconds')} s")
+                        solara.Markdown("Quality report: " + str(gis_quality_report.get("report_path")))
+                        solara.DataFrame(pd.DataFrame([{"layer": item.get("layer_path"), "QA status": item.get("qa_status"), "features": item.get("feature_count_actual"), "CRS": item.get("crs", {}).get("authority") or item.get("crs", {}).get("value"), "null/empty geometry": (item.get("geometry", {}).get("null_count", 0) + item.get("geometry", {}).get("empty_count", 0)), "invalid geometry": item.get("geometry", {}).get("invalid_count"), "fields": len(item.get("fields", [])), "blockers": " | ".join(item.get("blockers", [])), "warnings": " | ".join(item.get("warnings", []))} for item in gis_quality_report.get("layers", [])]))
+                        solara.Markdown("### Gold readiness — candidate screening only")
+                        solara.DataFrame(pd.DataFrame([{"Gold artifact": item.get("gold_artifact"), "candidate layers": item.get("candidate_count"), "readiness": item.get("readiness"), "decision": item.get("decision"), "reason": item.get("reason")} for item in gis_quality_report.get("gold_readiness", [])]))
+                        with solara.Details("Field completeness and sample values", expand=False):
+                            for item in gis_quality_report.get("layers", []):
+                                solara.Markdown(f"**{item.get('layer_path')}** — {item.get('qa_status')}")
+                                if item.get("fields"):
+                                    solara.DataFrame(pd.DataFrame(item["fields"]))
+                                if item.get("sample_records"):
+                                    solara.DataFrame(pd.DataFrame(item["sample_records"]))
+                        solara.Warning("Gold generation remains disabled until CRS, field meaning, geometry quality and output rules are reviewed.")
 
                     if checksum_results:
                         solara.Markdown("### Checksum verification results")
