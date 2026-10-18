@@ -59,3 +59,20 @@ GEOGCRS["WGS 84", ID["EPSG", 4326]]
     assert parsed["fields"] == []
     assert parsed["geometry_type"] == "Polygon"
     assert parsed["crs_authority"] == "EPSG:4326"
+
+
+from tomorrowcities.services.silver_pipeline import _gold_readiness_matrix
+
+
+def test_gold_readiness_matrix_keeps_candidates_unapproved():
+    layers = [
+        {"layer_path": "commondata/buildings.shp", "geometry_type": "Polygon", "feature_count": 10, "field_count": 4, "inspection_status": "inspected", "qa_status": "passed_initial_checks"},
+        {"layer_path": "commondata/roads.shp", "geometry_type": "Line String", "feature_count": 20, "field_count": 3, "inspection_status": "inspected", "qa_status": "review_warnings"},
+    ]
+    matrix = _gold_readiness_matrix(layers)
+    polygons = next(item for item in matrix if item["gold_artifact"] == "exclusion_polygons.geojson")
+    lines = next(item for item in matrix if item["gold_artifact"] == "exclusion_lines.geojson")
+    assert polygons["candidate_count"] == 1
+    assert lines["candidate_count"] == 1
+    assert polygons["readiness"] == "not_ready"
+    assert polygons["decision"] == "human_review_required"
