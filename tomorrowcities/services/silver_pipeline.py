@@ -275,48 +275,33 @@ def run_silver_gis_inspection(inventory_path):
                 }
                 try:
                     result = subprocess.run(
-                        [ogrinfo, "-ro", "-so", "-al", "-json", str(local_shp)],
+                        [ogrinfo, "-ro", "-so", "-al", str(local_shp)],
                         capture_output=True, text=True, timeout=120, check=False,
                     )
                     if result.returncode != 0:
                         detail = (result.stderr or result.stdout or "ogrinfo returned a non-zero exit code").strip()
                         record["warnings"].append(detail[-1500:])
                     else:
-                        parsed = json.loads(result.stdout)
-                        layers = parsed.get("layers", [])
-                        if not layers:
-                            record["warnings"].append("OGR returned no layers for this shapefile.")
-                        else:
-                            layer = layers[0]
-                            record["feature_count"] = layer.get("featureCount")
-                            geometry_fields = layer.get("geometryFields", [])
-                            if geometry_fields:
-                                record["geometry_type"] = geometry_fields[0].get("type")
-                                crs = geometry_fields[0].get("coordinateSystem", {})
-                            else:
-                                crs = layer.get("coordinateSystem", {})
-                            if isinstance(crs, dict):
-                                record["crs_name"] = crs.get("name")
-                                ids = crs.get("id", {})
-                                if isinstance(ids, dict):
-                                    authority = ids.get("authority")
-                                    code = ids.get("code")
-                                    if authority and code is not None:
-                                        record["crs_authority"] = f"{authority}:{code}"
-                            record["fields"] = [
-                                {
-                                    "name": field.get("name"),
-                                    "type": field.get("type"),
-                                    "nullable": field.get("nullable"),
-                                    "width": field.get("width"),
-                                }
-                                for field in layer.get("fields", [])
-                            ]
-                            record["field_count"] = len(record["fields"])
-                            record["inspection_status"] = "inspected"
+                        output = result.stdout
+                        feature_match = re.search(r"Feature Count:\s*(\d+)", output)
+                        geometry_match = re.search(r"Geometry:\s*(.+)", output)
+                        record["feature_count"] = int(feature_match.group(1)) if feature_match else None
+                        record["geometry_type"] = geometry_match.group(1).strip() if geometry_match else None
+                        epsg_match = re.search(r'ID\["EPSG",\s*(\d+)\]', output)
+                        record["crs_authority"] = f"EPSG:{epsg_match.group(1)}" if epsg_match else None
+                        srs_match = re.search(r"Layer SRS WKT:\s*\n\s*([^\n]+)", output)
+                        record["crs_name"] = srs_match.group(1).strip() if srs_match else None
+                        fields = []
+                        for line in output.splitlines():
+                            match = re.match(r"\s+([^:]+):\s+([^ (]+)(?:\s+\(([^)]*)\))?", line)
+                            if match:
+                                fields.append({"name": match.group(1).strip(), "type": match.group(2).strip(), "width": match.group(3)})
+                        record["fields"] = fields
+                        record["field_count"] = len(fields)
+                        record["inspection_status"] = "inspected"
                 except subprocess.TimeoutExpired:
                     record["warnings"].append("OGR inspection exceeded the 120-second timeout.")
-                except (json.JSONDecodeError, OSError, KeyError, TypeError) as exc:
+                except (OSError, KeyError, TypeError) as exc:
                     record["warnings"].append(f"Could not parse OGR inspection output: {exc}")
                 catalogue.append(record)
 
