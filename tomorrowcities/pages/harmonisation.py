@@ -427,7 +427,7 @@ def Page():
             set_assistant_answer(f"I can currently answer profile questions for {len(datasets)} dataset(s), report missing-cell counts, explain rule-based review flags, summarise mapping suggestions and describe safe row-appending. This panel is a local prototype, not yet connected to a live AI model.")
 
     stages = ["Upload", "Profile", "Map fields", "Review & harmonise", "Export"]
-    with solara.Column(gap="16px", style={"max-width": "1440px", "margin": "0 auto", "padding": "8px 12px 28px"}):
+    with solara.Column(gap="16px", style={"width": "100%", "max-width": "none", "min-width": "0", "margin": "0", "padding": "8px 20px 28px", "box-sizing": "border-box"}):
         with solara.Row(style={"align-items": "center", "justify-content": "space-between", "flex-wrap": "wrap"}):
             with solara.Column(gap="2px"):
                 solara.Markdown("# TCDSE Harmoniser")
@@ -439,7 +439,7 @@ def Page():
                 solara.Button(f"{mark}{i}. {label}", text=True, outlined=(stage == i),
                               disabled=(i > 2 and df is None), on_click=lambda n=i: set_stage(n),
                               style={"border-radius": "22px", "text-transform": "none"})
-        with solara.ColumnsResponsive(12, small=12, medium=8, large=8):
+        with solara.ColumnsResponsive(12, small=12, medium=12, large=12):
             with solara.Column(gap="12px"):
                 with solara.Card():
                     solara.Markdown("## Bronze raw-file import")
