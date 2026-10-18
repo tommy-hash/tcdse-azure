@@ -385,3 +385,226 @@ def run_silver_gis_inspection(inventory_path):
         return result_doc | {"report_path": report_path}
     finally:
         client.close()
+
+
+def _gold_readiness_matrix(layers):
+    """Map source candidates to Gold contracts without silently approving transformations."""
+    rules = [
+        ("exclusion_lines.geojson", ["road", "path", "waterway", "lagga", "electricity_line", "transmission_line", "distribution_line"], "Line features may be candidates; exclusion buffers/rules and units must be explicitly defined."),
+        ("exclusion_points.geojson", ["health", "shop", "place", "tank", "power_plant", "solar"], "Point/asset candidates only; confirm geometry and define whether/how each asset creates an exclusion."),
+        ("exclusion_polygons.geojson", ["building", "boundary", "land_use", "land_uses", "agricultural", "agriculture"], "Polygon candidates only; confirm geometry, land-use codes and exclusion logic."),
+        ("sample_landuse_file.geojson", ["land_uses_and_their_current_status", "land_use", "agricultural", "main_agricultural_areas"], "Likely land-use input; preserve source classes and verify category mappings before export."),
+        ("sample_distribution_file.xlsx", [], "Not derivable from the GIS layers alone; requires a defined tabular distribution schema and validated source indicators."),
+    ]
+    result = []
+    for target, tokens, note in rules:
+        candidates = []
+        if tokens:
+            for layer in layers:
+                name = PurePosixPath(layer.get("layer_path", "")).stem.lower()
+                if any(token in name for token in tokens):
+                    candidates.append({
+                        "layer_path": layer.get("layer_path"),
+                        "geometry_type": layer.get("geometry_type"),
+                        "feature_count": layer.get("feature_count"),
+                        "crs": layer.get("crs_authority") or layer.get("crs_name"),
+                        "inspection_status": layer.get("inspection_status"),
+                        "field_count": layer.get("field_count", 0),
+                        "qa_status": layer.get("qa_status", "not_assessed"),
+                    })
+        result.append({
+            "gold_artifact": target,
+            "candidate_layers": candidates,
+            "candidate_count": len(candidates),
+            "readiness": "not_ready",
+            "decision": "human_review_required",
+            "reason": note if candidates else (note if not tokens else "No candidate layers matched the current name-based screen; inspect catalogue manually."),
+        })
+    return result
+
+
+def run_silver_gis_quality_assessment(catalogue_path):
+    """Profile extracted shapefiles and produce a conservative Gold-readiness report."""
+    import tempfile
+    from pathlib import Path
+
+    started = time.perf_counter()
+    client, container = _storage()
+    try:
+        catalogue = json.loads(
+            container.get_blob_client(catalogue_path).download_blob().readall().decode("utf-8")
+        )
+        inventory_path = catalogue.get("source_inventory")
+        if not inventory_path:
+            raise ValueError("GIS catalogue does not reference its source inventory.")
+        inventory = json.loads(
+            container.get_blob_client(inventory_path).download_blob().readall().decode("utf-8")
+        )
+        all_members = [
+            member for file_report in inventory.get("files", [])
+            for member in file_report.get("extracted_members", [])
+        ]
+        import geopandas as gpd
+        import pandas as pd
+
+        qa_layers = []
+        with tempfile.TemporaryDirectory(prefix="tcdse-gis-qa-") as work:
+            root = Path(work)
+            for layer in catalogue.get("layers", []):
+                shp_name = layer.get("layer_path", "")
+                if layer.get("inspection_status") != "inspected":
+                    qa_layers.append({
+                        "layer_path": shp_name, "qa_status": "blocked",
+                        "blockers": ["Layer metadata inspection failed."],
+                    })
+                    continue
+                parent = PurePosixPath(shp_name).parent
+                stem = PurePosixPath(shp_name).stem
+                companions = [
+                    item for item in all_members
+                    if PurePosixPath(item.get("member", "")).parent == parent
+                    and PurePosixPath(item.get("member", "")).stem.lower() == stem.lower()
+                ]
+                for item in companions:
+                    safe = _safe_member(item.get("member", ""))
+                    if not safe:
+                        continue
+                    local_path = root / safe
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    local_path.write_bytes(
+                        container.get_blob_client(item["silver_path"]).download_blob().readall()
+                    )
+                local_shp = root / shp_name
+                record = {
+                    "layer_path": shp_name,
+                    "source_sha256": next((m.get("sha256") for m in companions if PurePosixPath(m.get("member", "")).suffix.lower() == ".shp"), None),
+                    "feature_count_catalogue": layer.get("feature_count"),
+                    "field_count_catalogue": layer.get("field_count", 0),
+                    "qa_status": "failed",
+                    "blockers": [],
+                    "warnings": [],
+                    "fields": [],
+                    "sample_records": [],
+                    "geometry": {},
+                    "crs": {},
+                }
+                try:
+                    gdf = gpd.read_file(local_shp)
+                    geom_col = gdf.geometry.name if hasattr(gdf, "geometry") else None
+                    actual_count = int(len(gdf))
+                    record["feature_count_actual"] = actual_count
+                    record["feature_count_matches_catalogue"] = (
+                        layer.get("feature_count") is None or actual_count == layer.get("feature_count")
+                    )
+                    if not record["feature_count_matches_catalogue"]:
+                        record["warnings"].append("Feature count differs from the OGR catalogue.")
+                    crs = gdf.crs
+                    record["crs"] = {
+                        "value": str(crs) if crs is not None else None,
+                        "authority": f"{crs.to_authority()[0]}:{crs.to_authority()[1]}" if crs is not None and crs.to_authority() else None,
+                        "present": crs is not None,
+                    }
+                    if crs is None:
+                        record["blockers"].append("CRS is missing; do not combine or reproject until the source CRS is established.")
+                    if geom_col and geom_col in gdf.columns:
+                        geom = gdf.geometry
+                        empty_count = int(geom.is_empty.fillna(False).sum())
+                        null_geom_count = int(geom.isna().sum())
+                        invalid_count = int((~geom.is_valid & ~geom.is_empty & geom.notna()).sum())
+                        geom_types = {str(k): int(v) for k, v in geom.geom_type.value_counts(dropna=False).items()}
+                        bounds = [float(v) for v in gdf.total_bounds] if actual_count else []
+                        record["geometry"] = {
+                            "column": geom_col, "types": geom_types, "bounds": bounds,
+                            "null_count": null_geom_count, "empty_count": empty_count,
+                            "invalid_count": invalid_count,
+                        }
+                        if null_geom_count:
+                            record["warnings"].append(f"{null_geom_count} null geometries.")
+                        if empty_count:
+                            record["warnings"].append(f"{empty_count} empty geometries.")
+                        if invalid_count:
+                            record["warnings"].append(f"{invalid_count} invalid geometries; do not repair automatically.")
+                        if len(geom_types) > 1:
+                            record["warnings"].append("Mixed geometry types found.")
+                    else:
+                        record["blockers"].append("No geometry column was detected.")
+                    columns = [str(col) for col in gdf.columns if col != geom_col]
+                    for col in columns:
+                        series = gdf[col]
+                        nulls = int(series.isna().sum())
+                        non_null = series.dropna()
+                        distinct = int(non_null.nunique(dropna=True))
+                        examples = []
+                        for value in non_null.drop_duplicates().head(8).tolist():
+                            if hasattr(value, "item"):
+                                value = value.item()
+                            examples.append(str(value)[:160])
+                        field = {
+                            "name": col,
+                            "dtype": str(series.dtype),
+                            "row_count": actual_count,
+                            "null_count": nulls,
+                            "null_pct": round((nulls / actual_count) * 100, 2) if actual_count else None,
+                            "distinct_non_null": distinct,
+                            "sample_values": examples,
+                        }
+                        record["fields"].append(field)
+                    identifier_fields = [
+                        col for col in columns
+                        if col.lower() in {"id", "fid", "objectid", "object_id", "globalid", "gid"}
+                    ]
+                    for col in identifier_fields:
+                        non_null = gdf[col].dropna()
+                        duplicate_count = int(non_null.duplicated().sum())
+                        record.setdefault("identifier_checks", []).append({
+                            "field": col, "null_count": int(gdf[col].isna().sum()),
+                            "duplicate_non_null_count": duplicate_count,
+                        })
+                        if duplicate_count:
+                            record["warnings"].append(f"Identifier field {col} has {duplicate_count} duplicate non-null values.")
+                    record["sample_records"] = [
+                        {str(k): (None if pd.isna(v) else str(v)[:160]) for k, v in row.items() if k != geom_col}
+                        for row in gdf.drop(columns=[geom_col], errors="ignore").head(5).to_dict(orient="records")
+                    ]
+                    if actual_count == 0:
+                        record["blockers"].append("Layer contains zero features.")
+                    if not columns:
+                        record["blockers"].append("No non-geometry attribute fields found.")
+                    record["qa_status"] = "blocked" if record["blockers"] else ("review_warnings" if record["warnings"] else "passed_initial_checks")
+                except Exception as exc:
+                    record["blockers"].append(f"GeoPandas could not read or profile the layer: {type(exc).__name__}: {exc}"[:1000])
+                    record["qa_status"] = "blocked"
+                qa_layers.append(record)
+
+        qa_by_path = {item.get("layer_path"): item for item in qa_layers}
+        for layer in catalogue.get("layers", []):
+            qa = qa_by_path.get(layer.get("layer_path"), {})
+            layer["qa_status"] = qa.get("qa_status", "not_assessed")
+        gold_matrix = _gold_readiness_matrix(catalogue.get("layers", []))
+        blockers = sum(1 for item in qa_layers if item.get("qa_status") == "blocked")
+        warnings = sum(1 for item in qa_layers if item.get("qa_status") == "review_warnings")
+        result_doc = {
+            "pipeline": "silver-gis-quality-v1",
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "source_catalogue": catalogue_path,
+            "silver_base": catalogue.get("silver_base"),
+            "layer_count": len(qa_layers),
+            "blocked_layer_count": blockers,
+            "layers_with_warnings": warnings,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "layers": qa_layers,
+            "gold_readiness": gold_matrix,
+            "gold_generation_allowed": False,
+            "gold_generation_note": "Gold generation remains gated on human approval of layer semantics, CRS, quality findings, exclusion rules and output schemas.",
+        }
+        report_path = f"{catalogue.get('silver_base', 'silver')}/silver_gis_quality_report.json"
+        container.get_blob_client(report_path).upload_blob(
+            json.dumps(result_doc, indent=2).encode("utf-8"), overwrite=True
+        )
+        # Refresh the catalogue's initial triage status, preserving original inspection metadata.
+        container.get_blob_client(catalogue_path).upload_blob(
+            json.dumps(catalogue, indent=2).encode("utf-8"), overwrite=True
+        )
+        return result_doc | {"report_path": report_path}
+    finally:
+        client.close()
