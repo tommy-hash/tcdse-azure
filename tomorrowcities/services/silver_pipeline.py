@@ -712,3 +712,189 @@ def run_silver_gis_quality_assessment(catalogue_path):
         return result_doc | {"report_path": report_path}
     finally:
         client.close()
+
+
+def run_silver_geometry_repair(quality_report_path):
+    """Repair invalid geometries into separate GeoPackage outputs and write an audit report.
+
+    Original Bronze and extracted Silver objects are never overwritten. Only features
+    marked invalid are passed through Shapely make_valid; no CRS is guessed or changed.
+    """
+    import tempfile
+    from pathlib import Path
+
+    started = time.perf_counter()
+    client, container = _storage()
+    try:
+        qa_doc = json.loads(
+            container.get_blob_client(quality_report_path).download_blob().readall().decode("utf-8")
+        )
+        catalogue_path = qa_doc.get("source_catalogue")
+        if not catalogue_path:
+            raise ValueError("Quality report has no source_catalogue path.")
+        catalogue = json.loads(
+            container.get_blob_client(catalogue_path).download_blob().readall().decode("utf-8")
+        )
+        inventory_path = catalogue.get("source_inventory")
+        if not inventory_path:
+            raise ValueError("GIS catalogue has no source_inventory path.")
+        inventory = json.loads(
+            container.get_blob_client(inventory_path).download_blob().readall().decode("utf-8")
+        )
+        members = [
+            member for file_report in inventory.get("files", [])
+            for member in file_report.get("extracted_members", [])
+        ]
+        import geopandas as gpd
+        import pandas as pd
+        import shapely
+        make_valid = getattr(shapely, "make_valid", None)
+        if make_valid is None:
+            from shapely.validation import make_valid
+
+        repair_results = []
+        with tempfile.TemporaryDirectory(prefix="tcdse-geometry-repair-") as work:
+            root = Path(work)
+            for qa_layer in qa_doc.get("layers", []):
+                geom_info = qa_layer.get("geometry", {})
+                invalid_count = int(geom_info.get("invalid_count") or 0)
+                if invalid_count <= 0:
+                    continue
+
+                layer_path = qa_layer.get("layer_path", "")
+                layer_parent = PurePosixPath(layer_path).parent
+                layer_stem = PurePosixPath(layer_path).stem
+                companions = [
+                    item for item in members
+                    if PurePosixPath(item.get("member", "")).parent == layer_parent
+                    and PurePosixPath(item.get("member", "")).stem.lower() == layer_stem.lower()
+                ]
+                layer_record = {
+                    "source_layer": layer_path,
+                    "invalid_features_before": invalid_count,
+                    "source_crs": qa_layer.get("crs", {}),
+                    "status": "failed",
+                    "assumptions": [
+                        "Only features flagged invalid by Shapely/GeoPandas are modified.",
+                        "Shapely make_valid is an appropriate topology repair candidate; output must be reviewed against the source map and domain meaning.",
+                        "CRS metadata is trusted as recorded in the source; no CRS is inferred, assigned or transformed.",
+                        "All original source and extracted files remain unchanged.",
+                    ],
+                    "repair_method": "shapely.make_valid",
+                    "warnings": [],
+                }
+                try:
+                    if not any(PurePosixPath(x.get("member", "")).suffix.lower() == ".shp" for x in companions):
+                        raise FileNotFoundError("Source shapefile member is missing from the extraction inventory.")
+                    for member in companions:
+                        safe = _safe_member(member.get("member", ""))
+                        if not safe:
+                            continue
+                        local = root / safe
+                        local.parent.mkdir(parents=True, exist_ok=True)
+                        local.write_bytes(container.get_blob_client(member["silver_path"]).download_blob().readall())
+
+                    local_shp = root / layer_path
+                    gdf = gpd.read_file(local_shp)
+                    if gdf.crs is None:
+                        raise ValueError("Source CRS is missing; repair output is withheld until authoritative CRS metadata is established.")
+                    geom_col = gdf.geometry.name
+                    invalid_mask = (~gdf.geometry.is_valid & ~gdf.geometry.is_empty & gdf.geometry.notna())
+                    before = int(invalid_mask.sum())
+                    if before == 0:
+                        layer_record["status"] = "no_longer_invalid"
+                        layer_record["invalid_features_before"] = 0
+                        layer_record["invalid_features_after"] = 0
+                        repair_results.append(layer_record)
+                        continue
+
+                    fixed = gdf.copy()
+                    repair_types = []
+                    for idx in fixed.index[invalid_mask]:
+                        original = fixed.at[idx, geom_col]
+                        repaired = make_valid(original)
+                        if repaired is None or repaired.is_empty:
+                            raise ValueError(f"make_valid returned empty geometry for feature index {idx}; no output published.")
+                        fixed.at[idx, geom_col] = repaired
+                        repair_types.append({
+                            "feature_index": str(idx),
+                            "before_type": original.geom_type,
+                            "after_type": repaired.geom_type,
+                            "before_valid": bool(original.is_valid),
+                            "after_valid": bool(repaired.is_valid),
+                        })
+
+                    remaining_invalid = int((~fixed.geometry.is_valid & ~fixed.geometry.is_empty & fixed.geometry.notna()).sum())
+                    if remaining_invalid:
+                        raise ValueError(f"{remaining_invalid} invalid geometries remain after make_valid; no output published.")
+                    if fixed.geometry.is_empty.any():
+                        raise ValueError("Output contains empty geometries after repair; no output published.")
+                    if fixed.geometry.isna().any():
+                        raise ValueError("Output contains null geometries; no output published.")
+
+                    output_name = f"{layer_stem}_repaired.gpkg"
+                    local_output = root / output_name
+                    fixed.to_file(local_output, layer=layer_stem[:60], driver="GPKG", index=False)
+                    check = gpd.read_file(local_output, layer=layer_stem[:60])
+                    output_invalid = int((~check.geometry.is_valid & ~check.geometry.is_empty & check.geometry.notna()).sum())
+                    if output_invalid or len(check) != len(gdf) or check.crs is None:
+                        raise ValueError("Written GeoPackage failed post-write validation (feature count, CRS or geometry validity).")
+
+                    blob_path = f"{catalogue.get('silver_base', 'silver')}/geometry_repair/{layer_stem}_repaired.gpkg"
+                    container.get_blob_client(blob_path).upload_blob(local_output.read_bytes(), overwrite=True)
+                    layer_record.update({
+                        "status": "repaired_derived_copy",
+                        "source_feature_count": int(len(gdf)),
+                        "output_feature_count": int(len(check)),
+                        "invalid_features_after": output_invalid,
+                        "feature_count_preserved": len(check) == len(gdf),
+                        "output_crs": str(check.crs),
+                        "output_geometry_types": {str(k): int(v) for k, v in check.geometry.geom_type.value_counts(dropna=False).items()},
+                        "repaired_feature_details": repair_types[:200],
+                        "repaired_feature_details_truncated": len(repair_types) > 200,
+                        "output_path": blob_path,
+                        "output_sha256": hashlib.sha256(local_output.read_bytes()).hexdigest(),
+                        "warnings": [
+                            "Geometry validity was repaired, but semantic correctness and preservation of intended boundaries/areas require visual/domain review.",
+                            "make_valid may change a geometry type or return a GeometryCollection; inspect output_geometry_types before Gold use.",
+                        ],
+                    })
+                except Exception as exc:
+                    layer_record["status"] = "failed"
+                    layer_record["error"] = f"{type(exc).__name__}: {exc}"[:1200]
+                repair_results.append(layer_record)
+
+        report = {
+            "pipeline": "silver-geometry-repair-v1",
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "source_quality_report": quality_report_path,
+            "source_catalogue": catalogue_path,
+            "silver_base": catalogue.get("silver_base"),
+            "repair_method": "Shapely make_valid",
+            "technology": {
+                "orchestration": "Python",
+                "vector_io_and_validation": "GeoPandas",
+                "geometry_repair": "Shapely make_valid",
+                "derived_format": "GeoPackage (GPKG)",
+                "storage": "Azure Blob Storage / ADLS Gen2-compatible container",
+            },
+            "reason_for_correction": "Restore topological validity where geometry validity checks fail, enabling safer downstream spatial operations; preserve originals and publish separate derived outputs.",
+            "assumptions": [
+                "Invalidity flags are meaningful and the source CRS metadata is authoritative.",
+                "make_valid is preferred over buffer(0) because it explicitly repairs invalid topology and avoids an undocumented buffer-based heuristic.",
+                "A repaired geometry is not automatically semantically correct; boundary/area changes and GeometryCollections require review.",
+                "No CRS transformation, feature deletion, identifier rewrite, or attribute imputation is performed.",
+            ],
+            "results": repair_results,
+            "attempted_layer_count": len(repair_results),
+            "repaired_layer_count": sum(1 for x in repair_results if x.get("status") == "repaired_derived_copy"),
+            "failed_layer_count": sum(1 for x in repair_results if x.get("status") == "failed"),
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "gold_generation_allowed": False,
+            "gold_gate_note": "Review repaired outputs, feature counts, CRS, geometry type changes and spatial meaning before Gold export.",
+        }
+        report_path = f"{catalogue.get('silver_base', 'silver')}/silver_geometry_repair_report.json"
+        container.get_blob_client(report_path).upload_blob(json.dumps(report, indent=2).encode("utf-8"), overwrite=True)
+        return report | {"report_path": report_path}
+    finally:
+        client.close()

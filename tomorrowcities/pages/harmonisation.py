@@ -10,7 +10,7 @@ import solara
 
 from ..components.file_drop import FileDropMultiple
 from ..services.bronze_upload import list_raw_batches, upload_raw_batch, verify_raw_batch
-from ..services.silver_pipeline import run_silver_inventory, run_silver_gis_inspection, run_silver_gis_quality_assessment
+from ..services.silver_pipeline import run_silver_inventory, run_silver_gis_inspection, run_silver_gis_quality_assessment, run_silver_geometry_repair
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ROWS = 100_000
@@ -243,6 +243,8 @@ def Page():
     gis_error, set_gis_error = solara.use_state("")
     gis_quality_report, set_gis_quality_report = solara.use_state(None)
     gis_quality_error, set_gis_quality_error = solara.use_state("")
+    geometry_repair_report, set_geometry_repair_report = solara.use_state(None)
+    geometry_repair_error, set_geometry_repair_error = solara.use_state("")
 
     def refresh_bronze():
         try:
@@ -306,6 +308,14 @@ def Page():
             set_gis_quality_error("")
         except Exception as exc:
             set_gis_quality_error(f"Silver GIS quality assessment failed: {exc}")
+
+    def run_geometry_repair(quality_report_path):
+        try:
+            report = run_silver_geometry_repair(quality_report_path)
+            set_geometry_repair_report(report)
+            set_geometry_repair_error("")
+        except Exception as exc:
+            set_geometry_repair_error(f"Silver geometry repair failed: {exc}")
 
     def verify_bronze_batch(manifest_path):
         try:
@@ -524,6 +534,23 @@ def Page():
                                 if item.get("sample_records"):
                                     solara.DataFrame(pd.DataFrame(item["sample_records"]))
                         solara.Warning("Gold generation remains disabled until CRS, field meaning, geometry quality and output rules are reviewed.")
+                        invalid_count = sum(int(item.get("geometry", {}).get("invalid_count") or 0) for item in gis_quality_report.get("layers", []))
+                        solara.Markdown("### Derived-copy geometry repair")
+                        solara.Markdown("Repairs invalid geometries only, writes separate GeoPackage files under Silver, and preserves original Bronze and extracted source files. No CRS is guessed or changed.")
+                        solara.Button("Repair invalid geometries in derived copies", on_click=lambda path=gis_quality_report.get("report_path", ""): run_geometry_repair(path), color="primary", disabled=not gis_quality_report.get("report_path") or invalid_count == 0)
+                    if geometry_repair_error:
+                        solara.Error(geometry_repair_error)
+                    if geometry_repair_report:
+                        solara.Markdown("### Geometry repair audit report")
+                        solara.Markdown("Report: " + str(geometry_repair_report.get("report_path")))
+                        solara.Markdown(f"**Attempted layers:** {geometry_repair_report.get('attempted_layer_count')} · **Repaired outputs:** {geometry_repair_report.get('repaired_layer_count')} · **Failed:** {geometry_repair_report.get('failed_layer_count')}")
+                        solara.Markdown("**Method:** " + str(geometry_repair_report.get("repair_method")) + " · **Technology:** Python, GeoPandas, Shapely and GeoPackage in Azure Blob/ADLS storage.")
+                        solara.Markdown("**Reason:** " + str(geometry_repair_report.get("reason_for_correction")))
+                        with solara.Details("Assumptions, methods and per-layer results", expand=True):
+                            solara.Markdown("\\n".join("- " + str(item) for item in geometry_repair_report.get("assumptions", [])))
+                            solara.DataFrame(pd.DataFrame([{"source layer": item.get("source_layer"), "status": item.get("status"), "invalid before": item.get("invalid_features_before"), "invalid after": item.get("invalid_features_after"), "source features": item.get("source_feature_count"), "output features": item.get("output_feature_count"), "output geometry types": str(item.get("output_geometry_types", {})), "output path": item.get("output_path"), "error": item.get("error"), "warnings": " | ".join(item.get("warnings", []))} for item in geometry_repair_report.get("results", [])]))
+                        solara.Warning("Review each repaired output against the original. Geometry validity does not prove semantic correctness; Gold generation remains gated on review and domain rules.")
+
 
                     if checksum_results:
                         solara.Markdown("### Checksum verification results")
