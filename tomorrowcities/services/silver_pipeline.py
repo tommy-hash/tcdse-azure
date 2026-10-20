@@ -559,6 +559,15 @@ def run_silver_gis_quality_assessment(catalogue_path):
                         null_geom_count = int(geom.isna().sum())
                         invalid_count = int((~geom.is_valid & ~geom.is_empty & geom.notna()).sum())
                         geom_types = {str(k): int(v) for k, v in geom.geom_type.value_counts(dropna=False).items()}
+                        base_geom_types = {}
+                        for geom_type, count in geom_types.items():
+                            normalized_type = (
+                                "Line" if "LineString" in geom_type or "Line" == geom_type
+                                else "Polygon" if "Polygon" in geom_type
+                                else "Point" if "Point" in geom_type
+                                else geom_type
+                            )
+                            base_geom_types[normalized_type] = base_geom_types.get(normalized_type, 0) + count
                         bounds = [float(v) for v in gdf.total_bounds] if actual_count else []
                         invalid_mask = (~geom.is_valid & ~geom.is_empty & geom.notna())
                         invalid_indices = [str(idx) for idx in gdf.index[invalid_mask].tolist()[:100]]
@@ -575,7 +584,12 @@ def run_silver_gis_quality_assessment(catalogue_path):
                         if invalid_count:
                             record["warnings"].append(f"{invalid_count} invalid geometries; do not repair automatically.")
                         if len(geom_types) > 1:
-                            record["warnings"].append("Mixed geometry types found.")
+                            if len(base_geom_types) == 1:
+                                record["warnings"].append(
+                                    "Mixed single/multi geometry variants found within one base geometry family; review target contract and normalise only in a derived copy if permitted."
+                                )
+                            else:
+                                record["warnings"].append("Mixed geometry families found; assess splitting by geometry family before Gold export.")
                     else:
                         record["blockers"].append("No geometry column was detected.")
                     columns = [str(col) for col in gdf.columns if col != geom_col]
@@ -611,6 +625,12 @@ def run_silver_gis_quality_assessment(catalogue_path):
                             {"value": str(value)[:160], "occurrences": int(count)}
                             for value, count in duplicate_values.head(100).items()
                         ]
+                        non_null_distinct = int(non_null.nunique(dropna=True))
+                        is_constant_placeholder = (
+                            len(non_null) > 1
+                            and non_null_distinct == 1
+                            and str(non_null.iloc[0]).strip() in {"0", "0.0", ""}
+                        )
                         duplicate_indices = [
                             str(idx) for idx in gdf.index[gdf[col].notna() & gdf[col].duplicated(keep=False)].tolist()[:100]
                         ]
@@ -618,13 +638,24 @@ def run_silver_gis_quality_assessment(catalogue_path):
                             "field": col, "null_count": int(gdf[col].isna().sum()),
                             "duplicate_non_null_count": duplicate_count,
                             "duplicate_distinct_value_count": int(len(duplicate_values)),
+                            "distinct_non_null_value_count": non_null_distinct,
+                            "constant_placeholder_suspected": is_constant_placeholder,
+                            "identifier_assessment": (
+                                "constant_placeholder_suspected"
+                                if is_constant_placeholder
+                                else "repeated_values_require_schema_review"
+                            ) if duplicate_count else "no_repeated_non_null_values_detected",
                             "duplicate_values_sample": duplicate_examples,
                             "affected_feature_indices_sample": duplicate_indices,
                             "indices_truncated": duplicate_count > len(duplicate_indices),
                             "interpretation": "Repeated identifiers are flagged for review; they are not assumed to be duplicate features.",
                         })
-                        if duplicate_count:
-                            record["warnings"].append(f"Identifier field {col} has {duplicate_count} duplicate non-null values.")
+                        if duplicate_count and is_constant_placeholder:
+                            record["warnings"].append(
+                                f"Identifier-like field {col} is constant ({str(non_null.iloc[0])}) across {len(non_null)} non-null records; likely placeholder/non-unique field, not evidence of duplicate features."
+                            )
+                        elif duplicate_count:
+                            record["warnings"].append(f"Identifier field {col} has {duplicate_count} duplicate non-null values; determine whether it is intended to be unique.")
                     record["sample_records"] = [
                         {str(k): (None if pd.isna(v) else str(v)[:160]) for k, v in row.items() if k != geom_col}
                         for row in gdf.drop(columns=[geom_col], errors="ignore").head(5).to_dict(orient="records")
