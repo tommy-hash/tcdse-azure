@@ -898,3 +898,210 @@ def run_silver_geometry_repair(quality_report_path):
         return report | {"report_path": report_path}
     finally:
         client.close()
+
+
+def run_silver_geometry_comparison(repair_report_path):
+    """Compare repaired GeoPackages to their extracted originals and write an audit report."""
+    import tempfile
+    from pathlib import Path
+
+    started = time.perf_counter()
+    client, container = _storage()
+    try:
+        repair_doc = json.loads(
+            container.get_blob_client(repair_report_path).download_blob().readall().decode("utf-8")
+        )
+        catalogue_path = repair_doc.get("source_catalogue")
+        if not catalogue_path:
+            raise ValueError("Repair report has no source catalogue path.")
+        catalogue = json.loads(
+            container.get_blob_client(catalogue_path).download_blob().readall().decode("utf-8")
+        )
+        inventory_path = catalogue.get("source_inventory")
+        inventory = json.loads(
+            container.get_blob_client(inventory_path).download_blob().readall().decode("utf-8")
+        )
+        members = [
+            member for file_report in inventory.get("files", [])
+            for member in file_report.get("extracted_members", [])
+        ]
+        import geopandas as gpd
+        import pandas as pd
+        from shapely.geometry import shape
+
+        results = []
+        with tempfile.TemporaryDirectory(prefix="tcdse-geometry-compare-") as work:
+            root = Path(work)
+            for repaired in repair_doc.get("results", []):
+                if repaired.get("status") != "repaired_derived_copy":
+                    continue
+                layer_path = repaired.get("source_layer", "")
+                parent = PurePosixPath(layer_path).parent
+                stem = PurePosixPath(layer_path).stem
+                companions = [
+                    item for item in members
+                    if PurePosixPath(item.get("member", "")).parent == parent
+                    and PurePosixPath(item.get("member", "")).stem.lower() == stem.lower()
+                ]
+                item_result = {
+                    "source_layer": layer_path,
+                    "repaired_path": repaired.get("output_path"),
+                    "status": "failed",
+                    "checks": {},
+                    "feature_comparisons": [],
+                    "warnings": [],
+                }
+                try:
+                    if not any(PurePosixPath(x.get("member", "")).suffix.lower() == ".shp" for x in companions):
+                        raise FileNotFoundError("Original extracted shapefile was not found in the inventory.")
+                    for member in companions:
+                        safe = _safe_member(member.get("member", ""))
+                        if not safe:
+                            continue
+                        local = root / safe
+                        local.parent.mkdir(parents=True, exist_ok=True)
+                        local.write_bytes(container.get_blob_client(member["silver_path"]).download_blob().readall())
+                    original_path = root / layer_path
+                    original = gpd.read_file(original_path)
+                    repaired_bytes = container.get_blob_client(repaired["output_path"]).download_blob().readall()
+                    repaired_path = root / f"{stem}_repaired.gpkg"
+                    repaired_path.write_bytes(repaired_bytes)
+                    repaired_gdf = gpd.read_file(repaired_path, layer=stem[:60])
+
+                    original_crs = str(original.crs) if original.crs else None
+                    repaired_crs = str(repaired_gdf.crs) if repaired_gdf.crs else None
+                    crs_match = bool(original_crs and repaired_crs and original.crs == repaired_gdf.crs)
+                    original_bounds = [float(v) for v in original.total_bounds] if len(original) else []
+                    repaired_bounds = [float(v) for v in repaired_gdf.total_bounds] if len(repaired_gdf) else []
+                    bounds_delta = [
+                        float(repaired_bounds[i] - original_bounds[i])
+                        for i in range(4)
+                    ] if len(original_bounds) == 4 and len(repaired_bounds) == 4 else None
+                    original_geom = original.geometry
+                    repaired_geom = repaired_gdf.geometry
+                    count_match = len(original) == len(repaired_gdf)
+                    geom_type_changes = []
+                    per_feature = []
+                    area_deltas = []
+                    length_deltas = []
+                    symmetric_diff_areas = []
+                    equal_count = 0
+                    validity_after = int((~repaired_geom.is_valid & ~repaired_geom.is_empty & repaired_geom.notna()).sum())
+                    for idx in range(min(len(original), len(repaired_gdf))):
+                        before = original_geom.iloc[idx]
+                        after = repaired_geom.iloc[idx]
+                        if before is None or after is None:
+                            per_feature.append({"feature_index": idx, "status": "null_geometry", "before_type": getattr(before, "geom_type", None), "after_type": getattr(after, "geom_type", None)})
+                            continue
+                        same_type = before.geom_type == after.geom_type
+                        if not same_type:
+                            geom_type_changes.append({"feature_index": idx, "before_type": before.geom_type, "after_type": after.geom_type})
+                        if before.equals(after):
+                            equal_count += 1
+                        area_delta = float(after.area - before.area)
+                        length_delta = float(after.length - before.length)
+                        area_deltas.append(area_delta)
+                        length_deltas.append(length_delta)
+                        try:
+                            symdiff = float(before.symmetric_difference(after).area)
+                        except Exception:
+                            symdiff = None
+                        if symdiff is not None:
+                            symmetric_diff_areas.append(symdiff)
+                        if not same_type or not before.equals(after) or abs(area_delta) > 1e-12 or abs(length_delta) > 1e-12:
+                            per_feature.append({
+                                "feature_index": idx,
+                                "before_type": before.geom_type,
+                                "after_type": after.geom_type,
+                                "type_changed": not same_type,
+                                "exact_topological_equality": bool(before.equals(after)),
+                                "before_area_crs_units_squared": float(before.area),
+                                "after_area_crs_units_squared": float(after.area),
+                                "area_delta_crs_units_squared": area_delta,
+                                "before_length_crs_units": float(before.length),
+                                "after_length_crs_units": float(after.length),
+                                "length_delta_crs_units": length_delta,
+                                "symmetric_difference_area_crs_units_squared": symdiff,
+                                "before_valid": bool(before.is_valid),
+                                "after_valid": bool(after.is_valid),
+                            })
+                    if not crs_match:
+                        item_result["warnings"].append("Source and repaired CRS do not match or one CRS is missing.")
+                    if not count_match:
+                        item_result["warnings"].append("Feature count changed; output requires investigation.")
+                    if geom_type_changes:
+                        item_result["warnings"].append("One or more geometry types changed during repair.")
+                    if validity_after:
+                        item_result["warnings"].append(f"{validity_after} invalid geometries remain in the repaired output.")
+                    item_result.update({
+                        "status": "compared",
+                        "feature_count_original": int(len(original)),
+                        "feature_count_repaired": int(len(repaired_gdf)),
+                        "feature_count_preserved": count_match,
+                        "crs_original": original_crs,
+                        "crs_repaired": repaired_crs,
+                        "crs_match": crs_match,
+                        "bounds_original": original_bounds,
+                        "bounds_repaired": repaired_bounds,
+                        "bounds_delta": bounds_delta,
+                        "extent_comparison_note": "Bounds are compared numerically in the source CRS. A project-approved Kalobeyei AOI bounds polygon/range is still required to prove the data falls within the intended study area.",
+                        "invalid_geometries_after": validity_after,
+                        "geometry_type_counts_original": {str(k): int(v) for k, v in original_geom.geom_type.value_counts(dropna=False).items()},
+                        "geometry_type_counts_repaired": {str(k): int(v) for k, v in repaired_geom.geom_type.value_counts(dropna=False).items()},
+                        "geometry_type_change_count": len(geom_type_changes),
+                        "geometry_type_changes_sample": geom_type_changes[:200],
+                        "exact_equal_feature_count": equal_count,
+                        "features_with_recorded_changes": len(per_feature),
+                        "area_delta_summary_crs_units_squared": {
+                            "min": min(area_deltas) if area_deltas else 0.0,
+                            "max": max(area_deltas) if area_deltas else 0.0,
+                            "sum": sum(area_deltas) if area_deltas else 0.0,
+                            "sum_absolute": sum(abs(x) for x in area_deltas),
+                        },
+                        "length_delta_summary_crs_units": {
+                            "min": min(length_deltas) if length_deltas else 0.0,
+                            "max": max(length_deltas) if length_deltas else 0.0,
+                            "sum_absolute": sum(abs(x) for x in length_deltas),
+                        },
+                        "symmetric_difference_area_summary_crs_units_squared": {
+                            "sum": sum(symmetric_diff_areas) if symmetric_diff_areas else 0.0,
+                            "max": max(symmetric_diff_areas) if symmetric_diff_areas else 0.0,
+                        },
+                        "feature_change_details": per_feature[:1000],
+                        "feature_change_details_truncated": len(per_feature) > 1000,
+                        "gold_review_status": "human_review_required",
+                    })
+                except Exception as exc:
+                    item_result["error"] = f"{type(exc).__name__}: {exc}"[:1200]
+                results.append(item_result)
+
+        report = {
+            "pipeline": "silver-geometry-comparison-v1",
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "source_repair_report": repair_report_path,
+            "source_catalogue": catalogue_path,
+            "repair_method": repair_doc.get("repair_method"),
+            "reason": "Quantify the geometry, feature-count, CRS and extent differences introduced by repair before downstream harmonisation.",
+            "technology": ["Python", "GeoPandas", "Shapely", "GeoPackage", "Azure Blob Storage / ADLS Gen2-compatible container"],
+            "assumptions": [
+                "Features are compared by row order because this repair workflow preserves feature order and count; a stable source feature key is not assumed.",
+                "Area and length values are expressed in the recorded CRS units; geographic CRS measurements are not interpreted as square metres/metres.",
+                "A numeric bounds match does not prove the layer lies within the approved Kalobeyei study area; authoritative AOI bounds are required.",
+                "Geometry validity is not equivalent to semantic correctness.",
+                "No source or repaired geometry is changed by this comparison step.",
+            ],
+            "results": results,
+            "layer_count": len(results),
+            "compared_layer_count": sum(1 for x in results if x.get("status") == "compared"),
+            "failed_layer_count": sum(1 for x in results if x.get("status") == "failed"),
+            "layers_with_crs_mismatch": sum(1 for x in results if x.get("status") == "compared" and not x.get("crs_match")),
+            "layers_with_extent_change": sum(1 for x in results if x.get("status") == "compared" and x.get("bounds_delta") and any(abs(v) > 1e-9 for v in x["bounds_delta"])),
+            "gold_generation_allowed": False,
+            "gold_gate_note": "Review per-feature changes and confirm study-area bounds, CRS and domain meaning before Gold approval.",
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+        }
+        report_path = f"{repair_doc.get('silver_base', 'silver')}/silver_geometry_comparison_report.json"
+        container.get_blob_client(report_path).upload_blob(json.dumps(report, indent=2).encode("utf-8"), overwrite=True)
+        return report | {"report_path": report_path}
+    finally:
+        client.close()
