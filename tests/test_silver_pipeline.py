@@ -109,3 +109,40 @@ def test_quality_resolution_actions_empty_for_clean_record():
         "geometry": {"invalid_count": 0, "types": {"Polygon": 4}},
         "crs": {"present": True},
     }) == []
+
+
+from tomorrowcities.services.silver_pipeline import _parse_ogrinfo_summary, _quality_resolution_actions
+
+
+def test_placeholder_id_assessment_is_exposed_by_quality_action():
+    action = _quality_resolution_actions({
+        "identifier_checks": [{
+            "field": "Id",
+            "duplicate_non_null_count": 26,
+            "constant_placeholder_suspected": True,
+            "distinct_non_null_value_count": 1,
+            "duplicate_values_sample": [{"value": "0", "occurrences": 27}],
+            "affected_feature_indices_sample": ["0", "1", "2"],
+            "null_count": 0,
+        }],
+        "geometry": {"invalid_count": 0, "types": {"LineString": 27}},
+        "crs": {"present": True},
+    })[0]
+    assert action["issue"] == "constant_placeholder_identifier"
+    assert "do not delete records" in action["recommended_action"]
+    assert "separate derived row key" in action["recommended_action"]
+
+
+def test_geometry_type_family_normalization_concept():
+    # Single and multi geometries can share a base family, while polygon/line is mixed family.
+    def base_family(value):
+        if "LineString" in value or value == "Line":
+            return "Line"
+        if "Polygon" in value:
+            return "Polygon"
+        if "Point" in value:
+            return "Point"
+        return value
+    assert len({base_family("Polygon"), base_family("MultiPolygon")}) == 1
+    assert len({base_family("LineString"), base_family("MultiLineString")}) == 1
+    assert len({base_family("Polygon"), base_family("LineString")}) == 2
