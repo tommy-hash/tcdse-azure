@@ -429,11 +429,20 @@ def _quality_resolution_actions(record):
     actions = []
     for check in record.get("identifier_checks", []):
         if check.get("duplicate_non_null_count", 0):
+            placeholder = check.get("constant_placeholder_suspected", False)
             actions.append({
-                "issue": "repeated_identifier",
+                "issue": "constant_placeholder_identifier" if placeholder else "repeated_identifier",
                 "field": check.get("field"),
-                "evidence": check.get("duplicate_values_sample", []),
-                "recommended_action": "Inspect affected records and source schema; determine whether the field is a feature key, parent/join key, or non-unique label. Do not delete or renumber records automatically.",
+                "evidence": {
+                    "distinct_non_null_value_count": check.get("distinct_non_null_value_count"),
+                    "duplicate_values_sample": check.get("duplicate_values_sample", []),
+                    "affected_feature_indices_sample": check.get("affected_feature_indices_sample", []),
+                },
+                "recommended_action": (
+                    "Treat this field as non-unique for now. Confirm the source schema; do not delete records or rewrite source IDs. If a unique Silver key is required, create a separate derived row key and preserve this original field."
+                    if placeholder else
+                    "Inspect affected records and source schema; determine whether the field is a feature key, parent/join key, or non-unique label. Do not delete or renumber records automatically."
+                ),
                 "status": "requires_human_review",
             })
         if check.get("null_count", 0):
