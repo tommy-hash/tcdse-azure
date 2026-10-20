@@ -10,7 +10,7 @@ import solara
 
 from ..components.file_drop import FileDropMultiple
 from ..services.bronze_upload import list_raw_batches, upload_raw_batch, verify_raw_batch
-from ..services.silver_pipeline import run_silver_inventory, run_silver_gis_inspection, run_silver_gis_quality_assessment, run_silver_geometry_repair
+from ..services.silver_pipeline import run_silver_inventory, run_silver_gis_inspection, run_silver_gis_quality_assessment, run_silver_geometry_repair, run_silver_geometry_comparison
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ROWS = 100_000
@@ -245,6 +245,8 @@ def Page():
     gis_quality_error, set_gis_quality_error = solara.use_state("")
     geometry_repair_report, set_geometry_repair_report = solara.use_state(None)
     geometry_repair_error, set_geometry_repair_error = solara.use_state("")
+    geometry_comparison_report, set_geometry_comparison_report = solara.use_state(None)
+    geometry_comparison_error, set_geometry_comparison_error = solara.use_state("")
 
     def refresh_bronze():
         try:
@@ -308,6 +310,14 @@ def Page():
             set_gis_quality_error("")
         except Exception as exc:
             set_gis_quality_error(f"Silver GIS quality assessment failed: {exc}")
+
+    def run_geometry_comparison(repair_report_path):
+        try:
+            report = run_silver_geometry_comparison(repair_report_path)
+            set_geometry_comparison_report(report)
+            set_geometry_comparison_error("")
+        except Exception as exc:
+            set_geometry_comparison_error(f"Geometry comparison failed: {exc}")
 
     def run_geometry_repair(quality_report_path):
         try:
@@ -550,6 +560,26 @@ def Page():
                             solara.Markdown("\\n".join("- " + str(item) for item in geometry_repair_report.get("assumptions", [])))
                             solara.DataFrame(pd.DataFrame([{"source layer": item.get("source_layer"), "status": item.get("status"), "invalid before": item.get("invalid_features_before"), "invalid after": item.get("invalid_features_after"), "source features": item.get("source_feature_count"), "output features": item.get("output_feature_count"), "output geometry types": str(item.get("output_geometry_types", {})), "output path": item.get("output_path"), "error": item.get("error"), "warnings": " | ".join(item.get("warnings", []))} for item in geometry_repair_report.get("results", [])]))
                         solara.Warning("Review each repaired output against the original. Geometry validity does not prove semantic correctness; Gold generation remains gated on review and domain rules.")
+                        solara.Markdown("### Compare repaired geometries with originals")
+                        solara.Markdown("Compares geometry types, feature counts, CRS, bounds, per-feature area/length changes and symmetric-difference area. Measurements use source CRS units; geographic CRS areas are not square metres.")
+                        solara.Button("Compare repaired geometries", on_click=lambda path=geometry_repair_report.get("report_path", ""): run_geometry_comparison(path), color="primary", disabled=not geometry_repair_report.get("report_path") or geometry_repair_report.get("repaired_layer_count", 0) == 0)
+                    if geometry_comparison_error:
+                        solara.Error(geometry_comparison_error)
+                    if geometry_comparison_report:
+                        solara.Markdown("### Geometry comparison and validation report")
+                        solara.Markdown("Report: " + str(geometry_comparison_report.get("report_path")))
+                        solara.Markdown("**Layers compared:** " + str(geometry_comparison_report.get("compared_layer_count")) + " / " + str(geometry_comparison_report.get("layer_count")) + " · **Failed:** " + str(geometry_comparison_report.get("failed_layer_count")) + " · **CRS mismatches:** " + str(geometry_comparison_report.get("layers_with_crs_mismatch")) + " · **Extent changes:** " + str(geometry_comparison_report.get("layers_with_extent_change")))
+                        solara.DataFrame(pd.DataFrame([{"source layer": item.get("source_layer"), "status": item.get("status"), "features original/repaired": str(item.get("feature_count_original")) + " / " + str(item.get("feature_count_repaired")), "CRS match": item.get("crs_match"), "original CRS": item.get("crs_original"), "repaired CRS": item.get("crs_repaired"), "invalid after": item.get("invalid_geometries_after"), "geometry type changes": item.get("geometry_type_change_count"), "area delta sum (CRS units²)": item.get("area_delta_summary_crs_units_squared", {}).get("sum_absolute"), "symmetric diff area (CRS units²)": item.get("symmetric_difference_area_summary_crs_units_squared", {}).get("sum"), "warnings": " | ".join(item.get("warnings", [])), "error": item.get("error")} for item in geometry_comparison_report.get("results", [])]))
+                        with solara.Details("Extent and per-feature comparison details", expand=False):
+                            for item in geometry_comparison_report.get("results", []):
+                                solara.Markdown("**" + str(item.get("source_layer")) + "**")
+                                solara.Markdown("Original bounds: " + str(item.get("bounds_original")) + " · Repaired bounds: " + str(item.get("bounds_repaired")) + " · Delta: " + str(item.get("bounds_delta")))
+                                if item.get("feature_change_details"):
+                                    solara.DataFrame(pd.DataFrame(item.get("feature_change_details")))
+                                if item.get("geometry_type_changes_sample"):
+                                    solara.DataFrame(pd.DataFrame(item.get("geometry_type_changes_sample")))
+                        solara.Warning("Bounds are compared numerically, but an approved Kalobeyei area-of-interest boundary is still required to prove spatial coverage. Review per-feature differences before Gold approval.")
+
 
 
                     if checksum_results:
