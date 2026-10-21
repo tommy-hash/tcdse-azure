@@ -986,6 +986,7 @@ def run_silver_geometry_comparison(repair_report_path):
                     length_deltas = []
                     symmetric_diff_areas = []
                     equal_count = 0
+                    topologically_changed_count = 0
                     validity_after = int((~repaired_geom.is_valid & ~repaired_geom.is_empty & repaired_geom.notna()).sum())
                     for idx in range(min(len(original), len(repaired_gdf))):
                         before = original_geom.iloc[idx]
@@ -996,8 +997,11 @@ def run_silver_geometry_comparison(repair_report_path):
                         same_type = before.geom_type == after.geom_type
                         if not same_type:
                             geom_type_changes.append({"feature_index": idx, "before_type": before.geom_type, "after_type": after.geom_type})
-                        if before.equals(after):
+                        topologically_equal = bool(before.equals(after))
+                        if topologically_equal:
                             equal_count += 1
+                        else:
+                            topologically_changed_count += 1
                         area_delta = float(after.area - before.area)
                         length_delta = float(after.length - before.length)
                         area_deltas.append(area_delta)
@@ -1014,7 +1018,8 @@ def run_silver_geometry_comparison(repair_report_path):
                                 "before_type": before.geom_type,
                                 "after_type": after.geom_type,
                                 "type_changed": not same_type,
-                                "exact_topological_equality": bool(before.equals(after)),
+                                "exact_topological_equality": topologically_equal,
+                                "change_class": "type_conversion_topologically_equivalent" if (not same_type and topologically_equal) else ("spatial_difference" if not topologically_equal else "no_topological_change"),
                                 "before_area_crs_units_squared": float(before.area),
                                 "after_area_crs_units_squared": float(after.area),
                                 "area_delta_crs_units_squared": area_delta,
@@ -1029,8 +1034,12 @@ def run_silver_geometry_comparison(repair_report_path):
                         item_result["warnings"].append("Source and repaired CRS do not match or one CRS is missing.")
                     if not count_match:
                         item_result["warnings"].append("Feature count changed; output requires investigation.")
-                    if geom_type_changes:
-                        item_result["warnings"].append("One or more geometry types changed during repair.")
+                    if geom_type_changes and topologically_changed_count == 0:
+                        item_result["warnings"].append("Geometry types changed, but all compared features are topologically equal; classify these as representation/type conversions, not measured spatial changes.")
+                    elif geom_type_changes:
+                        item_result["warnings"].append("Geometry types changed and one or more features also differ topologically; review the listed features.")
+                    if topologically_changed_count:
+                        item_result["warnings"].append(f"{topologically_changed_count} features are not topologically equal to their originals and require spatial review.")
                     if validity_after:
                         item_result["warnings"].append(f"{validity_after} invalid geometries remain in the repaired output.")
                     item_result.update({
@@ -1051,7 +1060,12 @@ def run_silver_geometry_comparison(repair_report_path):
                         "geometry_type_change_count": len(geom_type_changes),
                         "geometry_type_changes_sample": geom_type_changes[:200],
                         "exact_equal_feature_count": equal_count,
+                        "topologically_equal_feature_count": equal_count,
+                        "topologically_different_feature_count": topologically_changed_count,
+                        "type_changed_but_topologically_equal_count": sum(1 for item in geom_type_changes if original_geom.iloc[item["feature_index"]].equals(repaired_geom.iloc[item["feature_index"]])),
                         "features_with_recorded_changes": len(per_feature),
+                        "geometry_change_interpretation": "Type changes with topological equality are representation conversions. Topologically different features require review regardless of whether aggregate area or bounds changes are small.",
+                        "measurement_units_note": "Area and length use the recorded CRS units. Projected CRS units are not automatically equivalent to ground measurements; EPSG:3857 is especially unsuitable for precise area calculations. Recalculate physical area/length in an appropriate local projected CRS after CRS review.",
                         "area_delta_summary_crs_units_squared": {
                             "min": min(area_deltas) if area_deltas else 0.0,
                             "max": max(area_deltas) if area_deltas else 0.0,
