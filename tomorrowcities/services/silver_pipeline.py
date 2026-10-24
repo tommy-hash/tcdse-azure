@@ -982,6 +982,7 @@ def run_silver_geometry_comparison(repair_report_path):
                     count_match = len(original) == len(repaired_gdf)
                     geom_type_changes = []
                     per_feature = []
+                    spatial_difference_details = []
                     area_deltas = []
                     length_deltas = []
                     symmetric_diff_areas = []
@@ -1012,24 +1013,27 @@ def run_silver_geometry_comparison(repair_report_path):
                             symdiff = None
                         if symdiff is not None:
                             symmetric_diff_areas.append(symdiff)
-                        if not same_type or not before.equals(after) or abs(area_delta) > 1e-12 or abs(length_delta) > 1e-12:
-                            per_feature.append({
-                                "feature_index": idx,
-                                "before_type": before.geom_type,
-                                "after_type": after.geom_type,
-                                "type_changed": not same_type,
-                                "exact_topological_equality": topologically_equal,
-                                "change_class": "type_conversion_topologically_equivalent" if (not same_type and topologically_equal) else ("spatial_difference" if not topologically_equal else "no_topological_change"),
-                                "before_area_crs_units_squared": float(before.area),
-                                "after_area_crs_units_squared": float(after.area),
-                                "area_delta_crs_units_squared": area_delta,
-                                "before_length_crs_units": float(before.length),
-                                "after_length_crs_units": float(after.length),
-                                "length_delta_crs_units": length_delta,
-                                "symmetric_difference_area_crs_units_squared": symdiff,
-                                "before_valid": bool(before.is_valid),
-                                "after_valid": bool(after.is_valid),
-                            })
+                        feature_detail = {
+                            "feature_index": idx,
+                            "before_type": before.geom_type,
+                            "after_type": after.geom_type,
+                            "type_changed": not same_type,
+                            "exact_topological_equality": topologically_equal,
+                            "change_class": "type_conversion_topologically_equivalent" if (not same_type and topologically_equal) else ("spatial_difference" if not topologically_equal else "no_topological_change"),
+                            "before_area_crs_units_squared": float(before.area),
+                            "after_area_crs_units_squared": float(after.area),
+                            "area_delta_crs_units_squared": area_delta,
+                            "before_length_crs_units": float(before.length),
+                            "after_length_crs_units": float(after.length),
+                            "length_delta_crs_units": length_delta,
+                            "symmetric_difference_area_crs_units_squared": symdiff,
+                            "before_valid": bool(before.is_valid),
+                            "after_valid": bool(after.is_valid),
+                        }
+                        if not topologically_equal:
+                            spatial_difference_details.append(feature_detail)
+                        if not same_type or not topologically_equal or abs(area_delta) > 1e-12 or abs(length_delta) > 1e-12:
+                            per_feature.append(feature_detail)
                     if not crs_match:
                         item_result["warnings"].append("Source and repaired CRS do not match or one CRS is missing.")
                     if not count_match:
@@ -1083,6 +1087,8 @@ def run_silver_geometry_comparison(repair_report_path):
                         },
                         "feature_change_details": per_feature[:1000],
                         "feature_change_details_truncated": len(per_feature) > 1000,
+                        "spatial_difference_details": spatial_difference_details,
+                        "spatial_difference_details_count": len(spatial_difference_details),
                         "gold_review_status": "human_review_required",
                     })
                 except Exception as exc:
