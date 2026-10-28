@@ -56,7 +56,7 @@ class DiscoveryResult:
 
 def _normalise_path(path: str) -> str:
     """Normalise separators and reject unsafe/non-relative inventory paths."""
-    value = str(path or "").replace("\\\\", "/").strip()
+    value = str(path or "").replace(chr(92), "/").strip()
     if not value or value.startswith("/") or ":" in value:
         return ""
     parts = PurePosixPath(value).parts
