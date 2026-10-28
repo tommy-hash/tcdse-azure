@@ -57,6 +57,23 @@ for the Container App or processing service. Never put storage keys in source co
 7. Only validated/approved files are written to Gold, with a manifest and status
    returned to the Novice Urban Planner.
 
+## Boundary discovery and approval gate
+
+The initial boundary-discovery service is in
+`tomorrowcities/services/boundary_discovery.py`. It ranks candidate paths from a
+storage-adapter inventory using filename, project/geographic context, geometry type
+and CRS metadata. Ranking is only a search aid: candidates remain unverified and
+always require review. The service also checks whether required validation evidence
+has been supplied and gates a future approximation workflow on explicit permission.
+
+The service is intentionally storage-provider agnostic. It does not yet scan ADLS,
+open and validate geospatial files, generate approximate polygons, or write review
+decisions to a persistent queue. The next integration work is to add an ADLS inventory
+adapter using managed identity, a geometry validation adapter, and persisted review
+records. If discovery finds no usable boundary, the interactive assistant should ask
+permission before proposing a provisional AOI; an approximate AOI must not be published
+to Gold until the required human approval is recorded.
+
 ## Current implementation boundary
 
 The initial code registers and validates the sample Gold output contracts. It does
