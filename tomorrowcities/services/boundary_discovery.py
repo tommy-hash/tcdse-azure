@@ -331,3 +331,129 @@ def inventory_adls_boundary_candidates(
             requires_human_review=True,
         )
     return result
+
+
+def stage_boundary_candidate(
+    candidate_path: str,
+    *,
+    staging_root: str,
+    container_client: Any | None = None,
+    account_url: str | None = None,
+    filesystem: str | None = None,
+    max_bytes: int = 250 * 1024 * 1024,
+    allowed_extensions: Sequence[str] = (".gpkg", ".geojson", ".json", ".shp", ".kml", ".gml", ".fgb", ".parquet"),
+    expected_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Stage one candidate from ADLS into a restricted local directory.
+
+    Only a relative object path with an allowed extension is accepted. The object
+    is streamed to a uniquely named local file, bounded by max_bytes, hashed, and
+    never overwritten. The original lake object is not modified. For Shapefiles,
+    stage the geometry file only; a later adapter must stage its required sidecars
+    as a validated bundle before attempting to open it.
+    """
+    import hashlib
+    import os
+    import tempfile
+    from pathlib import Path
+
+    path = _normalise_path(candidate_path)
+    if not path or path != candidate_path.replace(chr(92), "/").strip():
+        raise ValueError("Candidate path must be a safe relative object path.")
+    if path.endswith("/"):
+        raise ValueError("Candidate path must identify a file, not a directory.")
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive.")
+    suffix = PurePosixPath(path).suffix.lower()
+    extensions = {str(ext).lower() for ext in allowed_extensions}
+    if suffix not in extensions:
+        raise ValueError(f"Unsupported boundary candidate extension: {suffix or '(none)'}.")
+
+    root = Path(staging_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not root.is_dir():
+        raise NotADirectoryError(f"Staging root is not a directory: {root}")
+    try:
+        os.chmod(root, 0o700)
+    except OSError:
+        pass
+
+    client = container_client
+    if client is None:
+        resolved_account_url = (account_url or os.getenv("TCDSE_ADLS_ACCOUNT_URL", "")).strip().rstrip("/")
+        resolved_filesystem = (filesystem or os.getenv("TCDSE_ADLS_FILESYSTEM", "")).strip()
+        if not resolved_account_url or not resolved_filesystem:
+            raise RuntimeError(
+                "Set TCDSE_ADLS_ACCOUNT_URL and TCDSE_ADLS_FILESYSTEM, "
+                "or pass an existing container_client."
+            )
+        from azure.identity import DefaultAzureCredential
+        from azure.storage.blob import BlobServiceClient
+
+        if ".dfs." in resolved_account_url:
+            resolved_account_url = resolved_account_url.replace(".dfs.", ".blob.")
+        service = BlobServiceClient(
+            account_url=resolved_account_url,
+            credential=DefaultAzureCredential(),
+        )
+        client = service.get_container_client(resolved_filesystem)
+
+    blob_client = client.get_blob_client(blob=path)
+    properties = blob_client.get_blob_properties()
+    declared_size = getattr(properties, "size", None)
+    if declared_size is not None and int(declared_size) > max_bytes:
+        raise ValueError(f"Candidate is {declared_size} bytes; configured limit is {max_bytes} bytes.")
+
+    fd, temporary_name = tempfile.mkstemp(prefix="tcdse-boundary-", suffix=suffix, dir=str(root))
+    staged = Path(temporary_name)
+    digest = hashlib.sha256()
+    bytes_written = 0
+    try:
+        try:
+            os.chmod(staged, 0o600)
+        except OSError:
+            pass
+        with os.fdopen(fd, "wb") as output:
+            downloader = blob_client.download_blob()
+            for chunk in downloader.chunks():
+                if not chunk:
+                    continue
+                bytes_written += len(chunk)
+                if bytes_written > max_bytes:
+                    raise ValueError(f"Streamed candidate exceeds configured limit of {max_bytes} bytes.")
+                digest.update(chunk)
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+
+        actual_sha256 = digest.hexdigest()
+        if expected_sha256 and actual_sha256.lower() != expected_sha256.strip().lower():
+            raise ValueError("Staged candidate SHA-256 does not match the expected hash.")
+        if declared_size is not None and bytes_written != int(declared_size):
+            raise IOError(
+                f"Downloaded byte count ({bytes_written}) differs from declared size ({declared_size})."
+            )
+        return {
+            "status": "staged",
+            "source_path": path,
+            "staged_path": str(staged),
+            "bytes_written": bytes_written,
+            "sha256": actual_sha256,
+            "content_type": getattr(properties, "content_settings", None).content_type
+                if getattr(properties, "content_settings", None) else None,
+            "source_last_modified": str(getattr(properties, "last_modified", "") or ""),
+            "source_etag": str(getattr(properties, "etag", "") or ""),
+            "read_only_source": True,
+            "geometry_validated": False,
+            "approved": False,
+            "warnings": (
+                ["Shapefile staged without sidecars; stage .shx/.dbf/.prj/.cpg as a verified bundle before reading."]
+                if suffix == ".shp" else []
+            ),
+        }
+    except Exception:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
