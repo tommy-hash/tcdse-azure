@@ -287,10 +287,40 @@ class BoundaryReviewStore:
         event_blob = self.container_client.get_blob_client(blob=event_path)
         event_payload = _json_bytes(event)
         event_blob.upload_blob(event_payload, overwrite=False)
+
+        # A create-only decision snapshot makes the final decision discoverable
+        # without rewriting the immutable pending record. It also prevents a second
+        # conflicting decision from being accepted for the same review.
+        decision_path = f"{self.prefix}/{review_id}/decision.json"
+        decision_blob = self.container_client.get_blob_client(blob=decision_path)
+        decision_snapshot = {
+            "review_id": review_id,
+            "state": updated["state"],
+            "decision": updated["decision"],
+            "gold_release_allowed": updated["gold_release_allowed"],
+            "event_hash": event["event_hash"],
+        }
+        decision_blob.upload_blob(_json_bytes(decision_snapshot), overwrite=False)
         return {"status": "decision_recorded", "review_id": review_id, "state": updated["state"],
                 "event_path": event_path, "event_hash": event["event_hash"],
                 "gold_release_allowed": updated["gold_release_allowed"],
-                "note": "Decision event is append-only. The original pending record remains unchanged."}
+                "note": "Decision event and create-only decision snapshot are persisted; original pending record is unchanged."}
+
+    def get_current_record(self, review_id: str) -> dict[str, Any]:
+        """Reconstruct the current review state from the immutable record and decision snapshot."""
+        record = self.get(review_id)
+        decision_path = f"{self.prefix}/{review_id}/decision.json"
+        try:
+            payload = self.container_client.get_blob_client(blob=decision_path).download_blob().readall()
+        except Exception:
+            return record
+        snapshot = json.loads(payload.decode("utf-8"))
+        if snapshot.get("review_id") != review_id:
+            raise ValueError("Stored decision snapshot failed identity validation.")
+        record["state"] = snapshot.get("state")
+        record["decision"] = snapshot.get("decision")
+        record["gold_release_allowed"] = snapshot.get("gold_release_allowed") is True
+        return record
 
     def get_events(self, review_id: str) -> list[dict[str, Any]]:
         _review_object_path(self.prefix, review_id)
