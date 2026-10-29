@@ -139,6 +139,16 @@ def test_store_saves_pending_review_and_appends_decision_event():
     assert decision["gold_release_allowed"] is True
     assert len(store.get_events(record["review_id"])) == 1
     assert store.get(record["review_id"])["state"] == "pending_review"
+    current = store.get_current_record(record["review_id"])
+    assert current["state"] == "approved"
+    assert validate_boundary_review_record(current)["allowed"]
+    with pytest.raises(FileExistsError):
+        store.append_decision(
+            record["review_id"],
+            decision="reject",
+            reviewer="other-reviewer",
+            rationale="Conflicting decision must not overwrite the first.",
+        )
 
 
 def test_store_does_not_overwrite_existing_pending_review():
