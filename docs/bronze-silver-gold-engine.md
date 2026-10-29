@@ -66,13 +66,18 @@ and CRS metadata. Ranking is only a search aid: candidates remain unverified and
 always require review. The service also checks whether required validation evidence
 has been supplied and gates a future approximation workflow on explicit permission.
 
-The service is intentionally storage-provider agnostic. It does not yet scan ADLS,
-open and validate geospatial files, generate approximate polygons, or write review
-decisions to a persistent queue. The next integration work is to add an ADLS inventory
-adapter using managed identity, a geometry validation adapter, and persisted review
-records. If discovery finds no usable boundary, the interactive assistant should ask
-permission before proposing a provisional AOI; an approximate AOI must not be published
-to Gold until the required human approval is recorded.
+The service now includes a read-only ADLS inventory adapter using `DefaultAzureCredential`
+and `TCDSE_ADLS_ACCOUNT_URL` / `TCDSE_ADLS_FILESYSTEM`, plus configurable
+`TCDSE_BOUNDARY_SEARCH_PREFIXES`. It also includes `inspect_boundary_geometry()` for
+local candidate files: geometry validity, polygonal type, CRS, bounds and optional
+intersection checks against supplied source layers. This inspector does not download
+ADLS objects; the caller must stage a candidate locally first. It also cannot establish
+authoritative AOI identity by itself, so lineage remains a separate review requirement.
+
+If discovery finds no usable boundary, the interactive assistant should ask permission
+before proposing a provisional AOI. An approximate AOI must not be published to Gold
+until the required human approval is recorded. Persisted review records, direct ADLS
+candidate staging, UI integration and AI polygon generation remain future work.
 
 ## Current implementation boundary
 

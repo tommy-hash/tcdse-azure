@@ -331,3 +331,160 @@ def inventory_adls_boundary_candidates(
             requires_human_review=True,
         )
     return result
+
+
+def inspect_boundary_geometry(
+    path: str,
+    *,
+    layer: str | None = None,
+    source_layer_paths: Sequence[str] = (),
+    source_layer_limit: int = 5,
+) -> dict[str, Any]:
+    """Inspect a local boundary file and optionally compare it with source layers.
+
+    This function reads a local file path (it does not download from ADLS). It
+    returns technical evidence, not an approval. Coverage is only marked checked
+    when at least one source layer was successfully read and compared. Lineage
+    remains unchecked unless a caller supplies and verifies provenance separately.
+    """
+    from pathlib import Path
+
+    import geopandas as gpd
+    import pandas as pd
+
+    candidate_path = Path(path)
+    if not candidate_path.is_file():
+        raise FileNotFoundError(f"Boundary candidate does not exist locally: {path}")
+
+    read_kwargs: dict[str, Any] = {}
+    if layer:
+        read_kwargs["layer"] = layer
+    try:
+        boundary = gpd.read_file(candidate_path, **read_kwargs)
+    except Exception as exc:
+        return {
+            "path": str(candidate_path),
+            "status": "unreadable",
+            "error": str(exc),
+            "geometry_valid": False,
+            "crs_known": False,
+            "coverage_checked": False,
+            "lineage_checked": False,
+            "eligible_for_human_approval": False,
+            "approved": False,
+        }
+
+    geometry = boundary.geometry
+    non_null = geometry[geometry.notna()]
+    non_empty = non_null[~non_null.is_empty]
+    invalid_mask = ~non_empty.is_valid
+    geometry_types = sorted(str(value) for value in non_empty.geom_type.dropna().unique())
+    polygonal = all(value in {"Polygon", "MultiPolygon"} for value in geometry_types)
+    bounds = None
+    if not non_empty.empty:
+        raw_bounds = non_empty.total_bounds.tolist()
+        bounds = [float(value) for value in raw_bounds]
+
+    errors: list[str] = []
+    if boundary.empty:
+        errors.append("Boundary layer contains no features.")
+    if len(non_null) != len(geometry):
+        errors.append(f"{len(geometry) - len(non_null)} feature(s) have null geometry.")
+    if len(non_empty) != len(non_null):
+        errors.append(f"{len(non_null) - len(non_empty)} feature(s) have empty geometry.")
+    invalid_count = int(invalid_mask.sum())
+    if invalid_count:
+        errors.append(f"{invalid_count} feature(s) have invalid geometry.")
+    if not polygonal:
+        errors.append("Boundary candidate contains non-polygon geometry.")
+    if boundary.crs is None:
+        errors.append("Boundary CRS is missing.")
+
+    coverage_results: list[dict[str, Any]] = []
+    for source_path in list(source_layer_paths)[:max(0, source_layer_limit)]:
+        try:
+            source = gpd.read_file(source_path)
+            if boundary.crs is None or source.crs is None:
+                coverage_results.append({
+                    "path": str(source_path),
+                    "status": "not_comparable",
+                    "reason": "Boundary or source layer CRS is missing.",
+                })
+                continue
+            source = source.to_crs(boundary.crs)
+            valid_boundary = non_empty[non_empty.is_valid]
+            if valid_boundary.empty:
+                coverage_results.append({
+                    "path": str(source_path),
+                    "status": "not_comparable",
+                    "reason": "No valid boundary geometry is available.",
+                })
+                continue
+            from shapely.ops import unary_union
+
+            boundary_union = unary_union(valid_boundary.tolist())
+            source_geometry = source.geometry
+            usable_source = source_geometry[source_geometry.notna() & ~source_geometry.is_empty]
+            if usable_source.empty:
+                coverage_results.append({
+                    "path": str(source_path),
+                    "status": "no_source_geometries",
+                    "feature_count": 0,
+                })
+                continue
+            intersects = usable_source.intersects(boundary_union)
+            coverage_results.append({
+                "path": str(source_path),
+                "status": "checked",
+                "feature_count": int(len(usable_source)),
+                "intersecting_feature_count": int(intersects.sum()),
+                "intersecting_feature_ratio": float(intersects.mean()),
+                "source_crs": str(source.crs),
+            })
+        except Exception as exc:
+            coverage_results.append({
+                "path": str(source_path),
+                "status": "error",
+                "error": str(exc),
+            })
+
+    coverage_checked = bool(coverage_results) and all(
+        item.get("status") in {"checked", "no_source_geometries"}
+        for item in coverage_results
+    )
+    geometry_valid = (
+        not boundary.empty
+        and len(non_null) == len(geometry)
+        and len(non_empty) == len(non_null)
+        and invalid_count == 0
+        and polygonal
+    )
+    crs_known = boundary.crs is not None
+    warnings = list(errors)
+    if not source_layer_paths:
+        warnings.append("No source layers supplied; spatial coverage has not been checked.")
+    if source_layer_paths and not coverage_checked:
+        warnings.append("One or more source-layer coverage comparisons could not be completed.")
+    warnings.append("Lineage and authoritative AOI identity require separate metadata/reviewer verification.")
+
+    return {
+        "path": str(candidate_path),
+        "status": "inspected",
+        "feature_count": int(len(boundary)),
+        "geometry_types": geometry_types,
+        "polygonal": polygonal,
+        "geometry_valid": bool(geometry_valid),
+        "invalid_geometry_count": invalid_count,
+        "null_geometry_count": int(geometry.isna().sum()),
+        "empty_geometry_count": int(non_null.is_empty.sum()),
+        "crs": str(boundary.crs) if boundary.crs is not None else None,
+        "crs_known": bool(crs_known),
+        "bounds": bounds,
+        "coverage_checked": bool(coverage_checked),
+        "coverage_results": coverage_results,
+        "lineage_checked": False,
+        "eligible_for_human_approval": bool(geometry_valid and crs_known and coverage_checked),
+        "approved": False,
+        "errors": errors,
+        "warnings": warnings,
+    }
