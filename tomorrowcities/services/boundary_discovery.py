@@ -242,3 +242,92 @@ def evaluate_approximation_permission(
         ),
         "gold_release_allowed": False,
     }
+
+def inventory_adls_boundary_candidates(
+    *,
+    account_url: str | None = None,
+    filesystem: str | None = None,
+    prefixes: Sequence[str] | None = None,
+    minimum_score: int = 4,
+    limit: int = 20,
+    container_client: Any | None = None,
+) -> DiscoveryResult:
+    """List configured ADLS/Blob objects and rank likely boundary candidates.
+
+    Uses DefaultAzureCredential when a client is not injected. Defaults are
+    limited to the Kalobeyei project folders. This lists metadata only; it does
+    not download files or validate their geometry. container_client supports tests
+    and callers that already have an authenticated client.
+    """
+    import os
+
+    resolved_prefixes = list(prefixes or [
+        value.strip()
+        for value in os.getenv(
+            "TCDSE_BOUNDARY_SEARCH_PREFIXES",
+            "bronze/kalobeyei/;silver/kalobeyei/;gold/tcdse/kalobeyei/",
+        ).split(";")
+        if value.strip()
+    ])
+    searched = tuple(resolved_prefixes)
+    client = container_client
+    if client is None:
+        resolved_account_url = (account_url or os.getenv("TCDSE_ADLS_ACCOUNT_URL", "")).strip().rstrip("/")
+        resolved_filesystem = (filesystem or os.getenv("TCDSE_ADLS_FILESYSTEM", "")).strip()
+        if not resolved_account_url or not resolved_filesystem:
+            raise RuntimeError(
+                "Set TCDSE_ADLS_ACCOUNT_URL and TCDSE_ADLS_FILESYSTEM, "
+                "or pass an existing container_client."
+            )
+        from azure.identity import DefaultAzureCredential
+        from azure.storage.blob import BlobServiceClient
+
+        if ".dfs." in resolved_account_url:
+            resolved_account_url = resolved_account_url.replace(".dfs.", ".blob.")
+        service = BlobServiceClient(
+            account_url=resolved_account_url,
+            credential=DefaultAzureCredential(),
+        )
+        client = service.get_container_client(resolved_filesystem)
+
+    inventory: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for prefix in resolved_prefixes:
+        for blob in client.list_blobs(name_starts_with=prefix):
+            name = str(getattr(blob, "name", "") or "")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            metadata = getattr(blob, "metadata", None) or {}
+            inventory.append({
+                "path": name,
+                "name": name.rsplit("/", 1)[-1],
+                "description": metadata.get("description", ""),
+                "project": metadata.get("project", ""),
+                "dataset": metadata.get("dataset", ""),
+                "geometry_type": metadata.get("geometry_type", ""),
+                "crs": metadata.get("crs", ""),
+                "crs_authority": metadata.get("crs_authority", ""),
+                "feature_count": metadata.get("feature_count"),
+                "modified_at": str(getattr(blob, "last_modified", "") or ""),
+                "size_bytes": getattr(blob, "size", None),
+                "source": "adls_blob_inventory",
+            })
+
+    result = discover_boundary_candidates(
+        inventory,
+        searched_locations=searched,
+        minimum_score=minimum_score,
+        limit=limit,
+    )
+    if not inventory:
+        return DiscoveryResult(
+            status="inventory_empty",
+            candidates=(),
+            searched_locations=searched,
+            warnings=(*result.warnings,
+                "No objects were returned from configured prefixes. Confirm prefixes, "
+                "filesystem, identity permissions and whether source files are stored elsewhere."),
+            requires_human_review=True,
+        )
+    return result
