@@ -283,14 +283,9 @@ class BoundaryReviewStore:
             edited_boundary_path=edited_boundary_path,
         )
         event = updated["events"][-1]
-        event_path = f"{self.prefix}/{review_id}/events/{event['event_hash']}.json"
-        event_blob = self.container_client.get_blob_client(blob=event_path)
-        event_payload = _json_bytes(event)
-        event_blob.upload_blob(event_payload, overwrite=False)
-
-        # A create-only decision snapshot makes the final decision discoverable
-        # without rewriting the immutable pending record. It also prevents a second
-        # conflicting decision from being accepted for the same review.
+        # The create-only decision blob is the atomic single-decision marker and
+        # stores the event alongside the current state. This prevents conflicting
+        # decisions without leaving an orphan event if a competing decision wins.
         decision_path = f"{self.prefix}/{review_id}/decision.json"
         decision_blob = self.container_client.get_blob_client(blob=decision_path)
         decision_snapshot = {
@@ -299,10 +294,11 @@ class BoundaryReviewStore:
             "decision": updated["decision"],
             "gold_release_allowed": updated["gold_release_allowed"],
             "event_hash": event["event_hash"],
+            "event": event,
         }
         decision_blob.upload_blob(_json_bytes(decision_snapshot), overwrite=False)
         return {"status": "decision_recorded", "review_id": review_id, "state": updated["state"],
-                "event_path": event_path, "event_hash": event["event_hash"],
+                "event_path": decision_path, "event_hash": event["event_hash"],
                 "gold_release_allowed": updated["gold_release_allowed"],
                 "note": "Decision event and create-only decision snapshot are persisted; original pending record is unchanged."}
 
@@ -332,4 +328,14 @@ class BoundaryReviewStore:
                 continue
             payload = self.container_client.get_blob_client(blob=name).download_blob().readall()
             events.append(json.loads(payload.decode("utf-8")))
+        decision_path = f"{self.prefix}/{review_id}/decision.json"
+        try:
+            payload = self.container_client.get_blob_client(blob=decision_path).download_blob().readall()
+            snapshot = json.loads(payload.decode("utf-8"))
+            if snapshot.get("review_id") != review_id:
+                raise ValueError("Stored decision snapshot failed identity validation.")
+            if isinstance(snapshot.get("event"), dict):
+                events.append(snapshot["event"])
+        except FileNotFoundError:
+            pass
         return sorted(events, key=lambda event: (event.get("at", ""), event.get("event_hash", "")))
