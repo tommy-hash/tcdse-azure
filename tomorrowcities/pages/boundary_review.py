@@ -16,7 +16,8 @@ from ..services.boundary_discovery import (
     inventory_adls_boundary_candidates,
     stage_boundary_candidate,
 )
-from ..services.boundary_approximation import propose_approximate_boundary\nfrom ..services.boundary_review_store import (
+from ..services.boundary_approximation import propose_approximate_boundary
+from ..services.boundary_review_store import (
     BoundaryReviewStore,
     apply_boundary_review_decision,
     create_boundary_review_record,
