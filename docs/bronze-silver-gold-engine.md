@@ -85,3 +85,14 @@ layouts and any constraints not represented by sheet names.
 Do not fabricate population, income, building classes, vulnerability values or other
 missing real-world data. Keep source files immutable and attach lineage to every
 derived output.
+
+
+## Consent-gated provisional boundary approximation
+
+tomorrowcities/services/boundary_approximation.py provides a deterministic provisional-AOI method. It requires permission_granted=True, one or more local reference layers with a known CRS, and at least three valid geometries by default. It projects the references to an estimated UTM CRS, computes their union's convex hull, applies an explicitly configured metric buffer, and writes a new GeoJSON or GeoPackage plus a metadata sidecar.
+
+The output is always marked PROVISIONAL_NOT_AUTHORITATIVE; metadata records input paths, hashes, feature counts, CRS, method, buffer distance, bounds and uncertainty notes. Existing outputs are not overwritten. The operation does not approve the boundary or permit Gold release.
+
+The boundary review page exposes this operation only after the user checks an explicit permission control. Reference paths must already be available locally in the application environment. This increment is an AI-assisted workflow foundation, not a generative-AI polygon model: the geometry itself is generated deterministically so that it is reproducible and auditable. An AI explanation/ranking layer can be added later, but must not invent authoritative boundaries or bypass human review.
+
+Before production use, validate reference completeness and the chosen buffer with domain experts, protect the page with authenticated access, and run tests in the deployment environment. A convex hull can include areas unsupported by source features and must not be treated as an administrative or settlement boundary.
