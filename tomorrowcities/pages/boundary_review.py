@@ -16,7 +16,7 @@ from ..services.boundary_discovery import (
     inventory_adls_boundary_candidates,
     stage_boundary_candidate,
 )
-from ..services.boundary_review_store import (
+from ..services.boundary_approximation import propose_approximate_boundary\nfrom ..services.boundary_review_store import (
     BoundaryReviewStore,
     apply_boundary_review_decision,
     create_boundary_review_record,
@@ -53,7 +53,7 @@ def Page():
     provenance_confirmed, set_provenance_confirmed = solara.use_state(False)
     reviewer, set_reviewer = solara.use_state("")
     rationale, set_rationale = solara.use_state("")
-    edited_path, set_edited_path = solara.use_state("")
+    edited_path, set_edited_path = solara.use_state("")\n    approximation_sources, set_approximation_sources = solara.use_state("")\n    approximation_output, set_approximation_output = solara.use_state("")\n    approximation_buffer, set_approximation_buffer = solara.use_state(250.0)\n    approximation_permission, set_approximation_permission = solara.use_state(False)\n    approximation_result, set_approximation_result = solara.use_state(None)
 
     def discover():
         set_error("")
@@ -277,6 +277,71 @@ def Page():
                 solara.Markdown(
                     "Approval is blocked unless geometry validity, CRS, coverage and lineage checks all pass. "
                     "This is only the boundary gate; other Gold checks still apply."
+                )
+
+        with solara.Card():
+            solara.Markdown("### 5. Propose an approximate boundary (only if no authoritative candidate is suitable)")
+            solara.Warning(
+                "This creates a provisional geometry, not an official settlement or project boundary. "
+                "It must be reviewed and approved before it can be considered for Gold."
+            )
+            solara.InputTextArea(
+                label="Local reference-layer paths (one per line)",
+                value=approximation_sources,
+                on_value=set_approximation_sources,
+                rows=4,
+            )
+            solara.InputText(
+                label="New output path (.geojson or .gpkg)",
+                value=approximation_output,
+                on_value=set_approximation_output,
+            )
+            solara.InputFloat(
+                label="Assumed buffer distance (metres)",
+                value=approximation_buffer,
+                on_value=set_approximation_buffer,
+            )
+            solara.Checkbox(
+                label="I explicitly authorize creation of a provisional approximate boundary from these reference layers.",
+                value=approximation_permission,
+                on_value=set_approximation_permission,
+            )
+
+            def generate_approximation():
+                set_error("")
+                set_approximation_result(None)
+                try:
+                    paths = [item.strip() for item in approximation_sources.splitlines() if item.strip()]
+                    result = propose_approximate_boundary(
+                        paths,
+                        output_path=approximation_output.strip(),
+                        permission_granted=approximation_permission,
+                        buffer_metres=float(approximation_buffer),
+                    )
+                    set_approximation_result(result)
+                    set_status(
+                        "Provisional boundary generated. It is not approved and cannot pass the Gold boundary gate."
+                    )
+                except Exception as exc:
+                    set_error(f"{type(exc).__name__}: {exc}")
+
+            solara.Button(
+                "Generate provisional boundary",
+                on_click=generate_approximation,
+                disabled=not (approximation_permission and bool(approximation_sources.strip()) and bool(approximation_output.strip())),
+                color="primary",
+            )
+            if approximation_result:
+                solara.Markdown(
+                    "**Approximation result**\\n\\n"
+                    f"- Output: {approximation_result.get('path')}\\n"
+                    f"- Method: {approximation_result.get('method')}\\n"
+                    f"- Features used: {approximation_result.get('feature_count')}\\n"
+                    f"- CRS: {approximation_result.get('crs')}\\n"
+                    f"- Bounds: {approximation_result.get('bounds')}\\n"
+                    f"- Metadata: {approximation_result.get('metadata_path')}\\n"
+                    f"- Gold release allowed: {approximation_result.get('gold_release_allowed')}\\n\\n"
+                    f"**Uncertainty:** {'; '.join(approximation_result.get('uncertainty_notes', []))}"
                 )
 
         if status:
