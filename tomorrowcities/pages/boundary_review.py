@@ -54,7 +54,12 @@ def Page():
     provenance_confirmed, set_provenance_confirmed = solara.use_state(False)
     reviewer, set_reviewer = solara.use_state("")
     rationale, set_rationale = solara.use_state("")
-    edited_path, set_edited_path = solara.use_state("")\n    approximation_sources, set_approximation_sources = solara.use_state("")\n    approximation_output, set_approximation_output = solara.use_state("")\n    approximation_buffer, set_approximation_buffer = solara.use_state(250.0)\n    approximation_permission, set_approximation_permission = solara.use_state(False)\n    approximation_result, set_approximation_result = solara.use_state(None)
+    edited_path, set_edited_path = solara.use_state("")
+    approximation_sources, set_approximation_sources = solara.use_state("")
+    approximation_output, set_approximation_output = solara.use_state("")
+    approximation_buffer, set_approximation_buffer = solara.use_state(250.0)
+    approximation_permission, set_approximation_permission = solara.use_state(False)
+    approximation_result, set_approximation_result = solara.use_state(None)
 
     def discover():
         set_error("")
@@ -169,7 +174,8 @@ def Page():
 
     with solara.Column(gap="12px", style={"max-width": "1000px", "margin": "0 auto", "padding": "16px"}):
         solara.Markdown(
-            "## Boundary Discovery & Review\n"
+            "## Boundary Discovery & Review
+"
             "Search configured ADLS prefixes, inspect a candidate, and record a human decision. "
             "Discovery is read-only; staging creates a temporary local copy. This page does not publish Gold."
         )
@@ -193,10 +199,16 @@ def Page():
                 candidate = next((item for item in candidates if item.get("path") == selected_path), None)
                 if candidate:
                     solara.Markdown(
-                        "**Discovery evidence**\n\n"
-                        f"- Score: {candidate.get('score')} (ranking only)\n"
-                        f"- Format: {candidate.get('extension')}\n"
-                        f"- Reasons: {', '.join(candidate.get('reasons', []))}\n\n"
+                        "**Discovery evidence**
+
+"
+                        f"- Score: {candidate.get('score')} (ranking only)
+"
+                        f"- Format: {candidate.get('extension')}
+"
+                        f"- Reasons: {', '.join(candidate.get('reasons', []))}
+
+"
                         "Candidate is unverified until its actual geometry and lineage are reviewed."
                     )
             elif status:
@@ -221,22 +233,36 @@ def Page():
             )
             if staged:
                 solara.Markdown(
-                    "**Staging evidence**\n\n"
-                    f"- Source: {staged.get('source_path')}\n"
-                    f"- Temporary path: {staged.get('staged_path')}\n"
-                    f"- Bytes: {staged.get('bytes_written')}\n"
+                    "**Staging evidence**
+
+"
+                    f"- Source: {staged.get('source_path')}
+"
+                    f"- Temporary path: {staged.get('staged_path')}
+"
+                    f"- Bytes: {staged.get('bytes_written')}
+"
                     f"- SHA-256: {staged.get('sha256')}"
                 )
             if validation:
                 solara.Markdown(
-                    "**Geometry validation**\n\n"
-                    f"- Status: {validation.get('status')}\n"
-                    f"- Geometry types: {', '.join(validation.get('geometry_types', [])) or 'none'}\n"
-                    f"- Valid geometry: {validation.get('geometry_valid')}\n"
-                    f"- CRS: {validation.get('crs')}\n"
-                    f"- Bounds: {validation.get('bounds')}\n"
-                    f"- Coverage checked: {validation.get('coverage_checked')}\n"
-                    f"- Lineage checked: {validation.get('lineage_checked')}\n"
+                    "**Geometry validation**
+
+"
+                    f"- Status: {validation.get('status')}
+"
+                    f"- Geometry types: {', '.join(validation.get('geometry_types', [])) or 'none'}
+"
+                    f"- Valid geometry: {validation.get('geometry_valid')}
+"
+                    f"- CRS: {validation.get('crs')}
+"
+                    f"- Bounds: {validation.get('bounds')}
+"
+                    f"- Coverage checked: {validation.get('coverage_checked')}
+"
+                    f"- Lineage checked: {validation.get('lineage_checked')}
+"
                     f"- Warnings: {'; '.join(validation.get('warnings', [])) or 'none'}"
                 )
 
@@ -264,8 +290,12 @@ def Page():
             if review_record:
                 gate = validate_boundary_review_record(review_record)
                 solara.Markdown(
-                    f"**Current state:** {review_record.get('state')}\n\n"
-                    f"**Boundary release gate:** {'PASS' if gate['allowed'] else 'BLOCKED'}\n\n"
+                    f"**Current state:** {review_record.get('state')}
+
+"
+                    f"**Boundary release gate:** {'PASS' if gate['allowed'] else 'BLOCKED'}
+
+"
                     f"**Gate findings:** {', '.join(gate['problems']) or 'none'}"
                 )
                 solara.InputText(label="Reviewer (audit label)", value=reviewer, on_value=set_reviewer)
@@ -334,14 +364,24 @@ def Page():
             )
             if approximation_result:
                 solara.Markdown(
-                    "**Approximation result**\\n\\n"
-                    f"- Output: {approximation_result.get('path')}\\n"
-                    f"- Method: {approximation_result.get('method')}\\n"
-                    f"- Features used: {approximation_result.get('feature_count')}\\n"
-                    f"- CRS: {approximation_result.get('crs')}\\n"
-                    f"- Bounds: {approximation_result.get('bounds')}\\n"
-                    f"- Metadata: {approximation_result.get('metadata_path')}\\n"
-                    f"- Gold release allowed: {approximation_result.get('gold_release_allowed')}\\n\\n"
+                    "**Approximation result**\
+\
+"
+                    f"- Output: {approximation_result.get('path')}\
+"
+                    f"- Method: {approximation_result.get('method')}\
+"
+                    f"- Features used: {approximation_result.get('feature_count')}\
+"
+                    f"- CRS: {approximation_result.get('crs')}\
+"
+                    f"- Bounds: {approximation_result.get('bounds')}\
+"
+                    f"- Metadata: {approximation_result.get('metadata_path')}\
+"
+                    f"- Gold release allowed: {approximation_result.get('gold_release_allowed')}\
+\
+"
                     f"**Uncertainty:** {'; '.join(approximation_result.get('uncertainty_notes', []))}"
                 )
 
