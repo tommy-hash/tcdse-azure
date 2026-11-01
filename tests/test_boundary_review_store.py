@@ -169,7 +169,7 @@ def test_review_id_and_paths_are_validated():
             requested_by="operator",
             purpose="test",
         )
-    gate = validate_boundary_review_record({"schema_version": 1, "state": "pending_review"})
+    gate = validate_boundary_review_record({"schema_version": 1, "review_id": "1" * 32, "state": "pending_review"})
     assert gate["allowed"] is False
     assert "boundary_not_approved" in gate["problems"]
     assert "gold_release_not_allowed" in gate["problems"]
