@@ -81,7 +81,7 @@ def test_staging_rejects_oversized_objects_before_download(tmp_path):
 
 
 def test_staging_removes_partial_file_when_stream_exceeds_limit(tmp_path):
-    client = FakeContainer({"bronze/kalobeyei/aoi.geojson": FakeBlobClient(b"x" * 80)})
+    client = FakeContainer({"bronze/kalobeyei/aoi.geojson": FakeBlobClient(b"x" * 80, size=20)})
     with pytest.raises(ValueError, match="exceeds configured limit"):
         stage_boundary_candidate(
             "bronze/kalobeyei/aoi.geojson",

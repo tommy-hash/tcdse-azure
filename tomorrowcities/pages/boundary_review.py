@@ -16,7 +16,8 @@ from ..services.boundary_discovery import (
     inventory_adls_boundary_candidates,
     stage_boundary_candidate,
 )
-from ..services.boundary_approximation import propose_approximate_boundary\nfrom ..services.boundary_review_store import (
+from ..services.boundary_approximation import propose_approximate_boundary
+from ..services.boundary_review_store import (
     BoundaryReviewStore,
     apply_boundary_review_decision,
     create_boundary_review_record,
@@ -53,7 +54,12 @@ def Page():
     provenance_confirmed, set_provenance_confirmed = solara.use_state(False)
     reviewer, set_reviewer = solara.use_state("")
     rationale, set_rationale = solara.use_state("")
-    edited_path, set_edited_path = solara.use_state("")\n    approximation_sources, set_approximation_sources = solara.use_state("")\n    approximation_output, set_approximation_output = solara.use_state("")\n    approximation_buffer, set_approximation_buffer = solara.use_state(250.0)\n    approximation_permission, set_approximation_permission = solara.use_state(False)\n    approximation_result, set_approximation_result = solara.use_state(None)
+    edited_path, set_edited_path = solara.use_state("")
+    approximation_sources, set_approximation_sources = solara.use_state("")
+    approximation_output, set_approximation_output = solara.use_state("")
+    approximation_buffer, set_approximation_buffer = solara.use_state(250.0)
+    approximation_permission, set_approximation_permission = solara.use_state(False)
+    approximation_result, set_approximation_result = solara.use_state(None)
 
     def discover():
         set_error("")
@@ -168,9 +174,9 @@ def Page():
 
     with solara.Column(gap="12px", style={"max-width": "1000px", "margin": "0 auto", "padding": "16px"}):
         solara.Markdown(
-            "## Boundary Discovery & Review\n"
-            "Search configured ADLS prefixes, inspect a candidate, and record a human decision. "
-            "Discovery is read-only; staging creates a temporary local copy. This page does not publish Gold."
+            """## Boundary Discovery & Review
+Search configured ADLS prefixes, inspect a candidate, and record a human decision.
+Discovery is read-only; staging creates a temporary local copy. This page does not publish Gold."""
         )
         solara.Warning(
             "Access control required: deploy this page only behind authenticated application access. "
@@ -192,11 +198,13 @@ def Page():
                 candidate = next((item for item in candidates if item.get("path") == selected_path), None)
                 if candidate:
                     solara.Markdown(
-                        "**Discovery evidence**\n\n"
-                        f"- Score: {candidate.get('score')} (ranking only)\n"
-                        f"- Format: {candidate.get('extension')}\n"
-                        f"- Reasons: {', '.join(candidate.get('reasons', []))}\n\n"
-                        "Candidate is unverified until its actual geometry and lineage are reviewed."
+                        f"""**Discovery evidence**
+
+- Score: {candidate.get('score')} (ranking only)
+- Format: {candidate.get('extension')}
+- Reasons: {', '.join(candidate.get('reasons', []))}
+
+Candidate is unverified until its actual geometry and lineage are reviewed."""
                     )
             elif status:
                 solara.Markdown("No candidate list is currently loaded.")
@@ -220,23 +228,25 @@ def Page():
             )
             if staged:
                 solara.Markdown(
-                    "**Staging evidence**\n\n"
-                    f"- Source: {staged.get('source_path')}\n"
-                    f"- Temporary path: {staged.get('staged_path')}\n"
-                    f"- Bytes: {staged.get('bytes_written')}\n"
-                    f"- SHA-256: {staged.get('sha256')}"
+                    f"""**Staging evidence**
+
+- Source: {staged.get('source_path')}
+- Temporary path: {staged.get('staged_path')}
+- Bytes: {staged.get('bytes_written')}
+- SHA-256: {staged.get('sha256')}"""
                 )
             if validation:
                 solara.Markdown(
-                    "**Geometry validation**\n\n"
-                    f"- Status: {validation.get('status')}\n"
-                    f"- Geometry types: {', '.join(validation.get('geometry_types', [])) or 'none'}\n"
-                    f"- Valid geometry: {validation.get('geometry_valid')}\n"
-                    f"- CRS: {validation.get('crs')}\n"
-                    f"- Bounds: {validation.get('bounds')}\n"
-                    f"- Coverage checked: {validation.get('coverage_checked')}\n"
-                    f"- Lineage checked: {validation.get('lineage_checked')}\n"
-                    f"- Warnings: {'; '.join(validation.get('warnings', [])) or 'none'}"
+                    f"""**Geometry validation**
+
+- Status: {validation.get('status')}
+- Geometry types: {', '.join(validation.get('geometry_types', [])) or 'none'}
+- Valid geometry: {validation.get('geometry_valid')}
+- CRS: {validation.get('crs')}
+- Bounds: {validation.get('bounds')}
+- Coverage checked: {validation.get('coverage_checked')}
+- Lineage checked: {validation.get('lineage_checked')}
+- Warnings: {'; '.join(validation.get('warnings', [])) or 'none'}"""
                 )
 
         with solara.Card():
@@ -263,9 +273,11 @@ def Page():
             if review_record:
                 gate = validate_boundary_review_record(review_record)
                 solara.Markdown(
-                    f"**Current state:** {review_record.get('state')}\n\n"
-                    f"**Boundary release gate:** {'PASS' if gate['allowed'] else 'BLOCKED'}\n\n"
-                    f"**Gate findings:** {', '.join(gate['problems']) or 'none'}"
+                    f"""**Current state:** {review_record.get('state')}
+
+**Boundary release gate:** {'PASS' if gate['allowed'] else 'BLOCKED'}
+
+**Gate findings:** {', '.join(gate['problems']) or 'none'}"""
                 )
                 solara.InputText(label="Reviewer (audit label)", value=reviewer, on_value=set_reviewer)
                 solara.InputText(label="Decision rationale", value=rationale, on_value=set_rationale)
@@ -333,15 +345,17 @@ def Page():
             )
             if approximation_result:
                 solara.Markdown(
-                    "**Approximation result**\\n\\n"
-                    f"- Output: {approximation_result.get('path')}\\n"
-                    f"- Method: {approximation_result.get('method')}\\n"
-                    f"- Features used: {approximation_result.get('feature_count')}\\n"
-                    f"- CRS: {approximation_result.get('crs')}\\n"
-                    f"- Bounds: {approximation_result.get('bounds')}\\n"
-                    f"- Metadata: {approximation_result.get('metadata_path')}\\n"
-                    f"- Gold release allowed: {approximation_result.get('gold_release_allowed')}\\n\\n"
-                    f"**Uncertainty:** {'; '.join(approximation_result.get('uncertainty_notes', []))}"
+                    f"""**Approximation result**
+
+- Output: {approximation_result.get('path')}
+- Method: {approximation_result.get('method')}
+- Features used: {approximation_result.get('feature_count')}
+- CRS: {approximation_result.get('crs')}
+- Bounds: {approximation_result.get('bounds')}
+- Metadata: {approximation_result.get('metadata_path')}
+- Gold release allowed: {approximation_result.get('gold_release_allowed')}
+
+**Uncertainty:** {'; '.join(approximation_result.get('uncertainty_notes', []))}"""
                 )
 
         if status:
