@@ -189,7 +189,18 @@ def apply_boundary_review_decision(
 
 
 def validate_boundary_review_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a fail-closed release-gate result for a persisted review record."""
+    """Validate review-record identity and paths, then evaluate its fail-closed release gate."""
+    review_id = str(record.get("review_id") or "")
+    if not re.fullmatch(r"[0-9a-f]{32}", review_id):
+        raise ValueError("review_id must be a 32-character lowercase UUID hex string.")
+
+    candidate = record.get("candidate")
+    if not isinstance(candidate, Mapping):
+        raise ValueError("Review record candidate metadata is required.")
+    _safe_relative_path(str(candidate.get("source_path") or ""))
+    if not str(candidate.get("staged_path") or "").strip():
+        raise ValueError("Review record staged_path is required.")
+
     problems: list[str] = []
     if record.get("schema_version") != 1:
         problems.append("unsupported_schema_version")
