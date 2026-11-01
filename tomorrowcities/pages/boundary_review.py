@@ -345,25 +345,17 @@ Candidate is unverified until its actual geometry and lineage are reviewed."""
             )
             if approximation_result:
                 solara.Markdown(
-                    "**Approximation result**\
-\
-"
-                    f"- Output: {approximation_result.get('path')}\
-"
-                    f"- Method: {approximation_result.get('method')}\
-"
-                    f"- Features used: {approximation_result.get('feature_count')}\
-"
-                    f"- CRS: {approximation_result.get('crs')}\
-"
-                    f"- Bounds: {approximation_result.get('bounds')}\
-"
-                    f"- Metadata: {approximation_result.get('metadata_path')}\
-"
-                    f"- Gold release allowed: {approximation_result.get('gold_release_allowed')}\
-\
-"
-                    f"**Uncertainty:** {'; '.join(approximation_result.get('uncertainty_notes', []))}"
+                    f"""**Approximation result**
+
+- Output: {approximation_result.get('path')}
+- Method: {approximation_result.get('method')}
+- Features used: {approximation_result.get('feature_count')}
+- CRS: {approximation_result.get('crs')}
+- Bounds: {approximation_result.get('bounds')}
+- Metadata: {approximation_result.get('metadata_path')}
+- Gold release allowed: {approximation_result.get('gold_release_allowed')}
+
+**Uncertainty:** {'; '.join(approximation_result.get('uncertainty_notes', []))}"""
                 )
 
         if status:
