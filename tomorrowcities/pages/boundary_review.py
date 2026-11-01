@@ -174,10 +174,9 @@ def Page():
 
     with solara.Column(gap="12px", style={"max-width": "1000px", "margin": "0 auto", "padding": "16px"}):
         solara.Markdown(
-            "## Boundary Discovery & Review
-"
-            "Search configured ADLS prefixes, inspect a candidate, and record a human decision. "
-            "Discovery is read-only; staging creates a temporary local copy. This page does not publish Gold."
+            """## Boundary Discovery & Review
+Search configured ADLS prefixes, inspect a candidate, and record a human decision.
+Discovery is read-only; staging creates a temporary local copy. This page does not publish Gold."""
         )
         solara.Warning(
             "Access control required: deploy this page only behind authenticated application access. "
@@ -199,17 +198,13 @@ def Page():
                 candidate = next((item for item in candidates if item.get("path") == selected_path), None)
                 if candidate:
                     solara.Markdown(
-                        "**Discovery evidence**
+                        f"""**Discovery evidence**
 
-"
-                        f"- Score: {candidate.get('score')} (ranking only)
-"
-                        f"- Format: {candidate.get('extension')}
-"
-                        f"- Reasons: {', '.join(candidate.get('reasons', []))}
+- Score: {candidate.get('score')} (ranking only)
+- Format: {candidate.get('extension')}
+- Reasons: {', '.join(candidate.get('reasons', []))}
 
-"
-                        "Candidate is unverified until its actual geometry and lineage are reviewed."
+Candidate is unverified until its actual geometry and lineage are reviewed."""
                     )
             elif status:
                 solara.Markdown("No candidate list is currently loaded.")
@@ -233,37 +228,25 @@ def Page():
             )
             if staged:
                 solara.Markdown(
-                    "**Staging evidence**
+                    f"""**Staging evidence**
 
-"
-                    f"- Source: {staged.get('source_path')}
-"
-                    f"- Temporary path: {staged.get('staged_path')}
-"
-                    f"- Bytes: {staged.get('bytes_written')}
-"
-                    f"- SHA-256: {staged.get('sha256')}"
+- Source: {staged.get('source_path')}
+- Temporary path: {staged.get('staged_path')}
+- Bytes: {staged.get('bytes_written')}
+- SHA-256: {staged.get('sha256')}"""
                 )
             if validation:
                 solara.Markdown(
-                    "**Geometry validation**
+                    f"""**Geometry validation**
 
-"
-                    f"- Status: {validation.get('status')}
-"
-                    f"- Geometry types: {', '.join(validation.get('geometry_types', [])) or 'none'}
-"
-                    f"- Valid geometry: {validation.get('geometry_valid')}
-"
-                    f"- CRS: {validation.get('crs')}
-"
-                    f"- Bounds: {validation.get('bounds')}
-"
-                    f"- Coverage checked: {validation.get('coverage_checked')}
-"
-                    f"- Lineage checked: {validation.get('lineage_checked')}
-"
-                    f"- Warnings: {'; '.join(validation.get('warnings', [])) or 'none'}"
+- Status: {validation.get('status')}
+- Geometry types: {', '.join(validation.get('geometry_types', [])) or 'none'}
+- Valid geometry: {validation.get('geometry_valid')}
+- CRS: {validation.get('crs')}
+- Bounds: {validation.get('bounds')}
+- Coverage checked: {validation.get('coverage_checked')}
+- Lineage checked: {validation.get('lineage_checked')}
+- Warnings: {'; '.join(validation.get('warnings', [])) or 'none'}"""
                 )
 
         with solara.Card():
@@ -290,13 +273,11 @@ def Page():
             if review_record:
                 gate = validate_boundary_review_record(review_record)
                 solara.Markdown(
-                    f"**Current state:** {review_record.get('state')}
+                    f"""**Current state:** {review_record.get('state')}
 
-"
-                    f"**Boundary release gate:** {'PASS' if gate['allowed'] else 'BLOCKED'}
+**Boundary release gate:** {'PASS' if gate['allowed'] else 'BLOCKED'}
 
-"
-                    f"**Gate findings:** {', '.join(gate['problems']) or 'none'}"
+**Gate findings:** {', '.join(gate['problems']) or 'none'}"""
                 )
                 solara.InputText(label="Reviewer (audit label)", value=reviewer, on_value=set_reviewer)
                 solara.InputText(label="Decision rationale", value=rationale, on_value=set_rationale)
