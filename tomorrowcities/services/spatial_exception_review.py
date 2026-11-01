@@ -171,6 +171,10 @@ class SpatialExceptionReviewStore:
 
     def decide(self, review_id: str, *, decision: str, reviewer: str, rationale: str) -> dict[str, Any]:
         current = self.get(review_id)
+        # A persisted decision is final. Report the create-only conflict consistently;
+        # the subsequent overwrite=False upload remains the race-safe backstop.
+        if current.get("status") != "pending" or current.get("decision") is not None:
+            raise FileExistsError(f"A decision has already been recorded for review {review_id}.")
         updated = decide_spatial_exception(current, decision=decision, reviewer=reviewer, rationale=rationale)
         snapshot = {
             "review_id": review_id,
